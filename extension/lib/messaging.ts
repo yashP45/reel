@@ -1,0 +1,52 @@
+import type { RecordingOptions, RecordingMeta, StoredRecording, UploadProgress } from './types';
+
+export type Message =
+  | { type: 'GET_STATE' }
+  | { type: 'STATE_UPDATE'; state: AppState }
+  | { type: 'START_RECORDING'; options: RecordingOptions }
+  | { type: 'COUNTDOWN_TICK'; remaining: number }
+  | { type: 'RECORDING_STARTED'; startedAt: number }
+  | { type: 'PAUSE_RECORDING' }
+  | { type: 'RESUME_RECORDING' }
+  | { type: 'STOP_RECORDING' }
+  | { type: 'CANCEL_RECORDING' }
+  | { type: 'RECORDING_COMPLETE'; meta: RecordingMeta; buffer: ArrayBuffer }
+  | { type: 'RECORDING_ERROR'; error: string }
+  | { type: 'OVERLAY_SHOW'; options: Pick<RecordingOptions, 'webcam' | 'mic'> }
+  | { type: 'OVERLAY_HIDE' }
+  | { type: 'OVERLAY_TICK'; elapsedMs: number }
+  | { type: 'OVERLAY_PAUSED'; paused: boolean }
+  | { type: 'UPLOAD_RECORDING'; recordingId: string }
+  | { type: 'UPLOAD_PROGRESS'; progress: UploadProgress }
+  | { type: 'OPEN_SIDE_PANEL' }
+  | { type: 'RECORDER_PING' }
+  | { type: 'RECORDER_PONG' };
+
+export interface AppState {
+  phase: import('./types').RecorderPhase;
+  recordingTabId?: number;
+  startedAt?: number;
+  elapsedMs?: number;
+  paused?: boolean;
+  countdownRemaining?: number;
+  currentRecording?: StoredRecording;
+  uploadProgress?: UploadProgress;
+  error?: string;
+}
+
+export function sendMessage<T = unknown>(message: Message): Promise<T> {
+  return chrome.runtime.sendMessage(message) as Promise<T>;
+}
+
+export function onMessage(
+  handler: (message: Message, sender: chrome.runtime.MessageSender) => void | Promise<void>,
+): void {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    const result = handler(message as Message, sender);
+    if (result instanceof Promise) {
+      result.then(() => sendResponse(undefined)).catch(console.error);
+      return true;
+    }
+    return undefined;
+  });
+}
