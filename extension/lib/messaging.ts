@@ -5,6 +5,12 @@ export type Message =
   | { type: 'STATE_UPDATE'; state: AppState }
   | { type: 'START_RECORDING'; options: RecordingOptions }
   | { type: 'OFFSCREEN_START'; options: RecordingOptions; streamId?: string }
+  | { type: 'OFFSCREEN_STOP' }
+  | { type: 'OFFSCREEN_PAUSE' }
+  | { type: 'OFFSCREEN_RESUME' }
+  | { type: 'OFFSCREEN_CANCEL' }
+  | { type: 'CONTENT_PING' }
+  | { type: 'MIC_UNAVAILABLE' }
   | { type: 'COUNTDOWN_TICK'; remaining: number }
   | { type: 'RECORDING_STARTED'; startedAt: number }
   | { type: 'PAUSE_RECORDING' }

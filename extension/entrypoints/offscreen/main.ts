@@ -29,7 +29,6 @@ async function getCapturedStream(streamId: string, source: 'tab' | 'desktop'): P
     });
   } catch (audioErr) {
     if (source !== 'tab') throw audioErr;
-    // Some tabs have no audio track — capture video only
     return navigator.mediaDevices.getUserMedia({
       video: { mandatory } as MediaTrackConstraints,
     });
@@ -59,8 +58,8 @@ async function maybeAddMic(stream: MediaStream, enableMic: boolean): Promise<Med
     if (audioTracks.length > 0) {
       stream.addTrack(audioTracks[0]!);
     }
-  } catch (err) {
-    console.warn('Microphone unavailable:', err);
+  } catch {
+    chrome.runtime.sendMessage({ type: 'MIC_UNAVAILABLE' } satisfies Message).catch(() => {});
   }
   return stream;
 }
@@ -137,7 +136,12 @@ function stopRecording(): void {
   }
 }
 
-chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }) => {
+chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }, _sender, sendResponse) => {
+  if (message.type === 'RECORDER_PING') {
+    sendResponse('pong');
+    return true;
+  }
+
   switch (message.type) {
     case 'OFFSCREEN_START':
       startRecording(message.options, message.streamId).catch((err) => {
@@ -147,16 +151,16 @@ chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }) 
         });
       });
       break;
-    case 'STOP_RECORDING':
+    case 'OFFSCREEN_STOP':
       stopRecording();
       break;
-    case 'PAUSE_RECORDING':
+    case 'OFFSCREEN_PAUSE':
       if (mediaRecorder?.state === 'recording') mediaRecorder.pause();
       break;
-    case 'RESUME_RECORDING':
+    case 'OFFSCREEN_RESUME':
       if (mediaRecorder?.state === 'paused') mediaRecorder.resume();
       break;
-    case 'CANCEL_RECORDING':
+    case 'OFFSCREEN_CANCEL':
       recordedChunks = [];
       if (mediaRecorder) {
         mediaRecorder.onstop = null;
@@ -167,4 +171,6 @@ chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }) 
       currentOptions = null;
       break;
   }
+
+  return undefined;
 });

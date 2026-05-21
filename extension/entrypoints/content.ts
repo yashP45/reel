@@ -114,11 +114,14 @@ function createOverlay(webcam: boolean): HTMLElement {
     webcamEl.style.display = 'block';
     const video = root.querySelector('#reel-webcam video') as HTMLVideoElement;
     navigator.mediaDevices
-      .getUserMedia({ video: { width: 320, height: 320 }, audio: false })
+      .getUserMedia({ video: { width: 320, height: 320, facingMode: 'user' }, audio: false })
       .then((stream) => {
         video.srcObject = stream;
       })
-      .catch(console.error);
+      .catch(() => {
+        webcamEl.innerHTML =
+          '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:32px;color:#71717a;">📷</div>';
+      });
   }
 
   root.querySelector('#reel-pause')?.addEventListener('click', () => {
@@ -156,11 +159,15 @@ function showCountdown(n: number): void {
 }
 
 export default defineContentScript({
-  matches: ['<all_urls>'],
-  registration: 'runtime',
+  matches: ['http://*/*', 'https://*/*'],
   runAt: 'document_idle',
   main() {
-    chrome.runtime.onMessage.addListener((message: Message) => {
+    chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
+      if (message.type === 'CONTENT_PING') {
+        sendResponse('pong');
+        return true;
+      }
+
       switch (message.type) {
         case 'OVERLAY_SHOW':
           createOverlay(message.options.webcam);
@@ -183,6 +190,7 @@ export default defineContentScript({
           if (message.remaining <= 0) showCountdown(0);
           break;
       }
+      return undefined;
     });
   },
 });

@@ -25,6 +25,21 @@ export async function setupOffscreenDocument(): Promise<void> {
   creating = null;
 }
 
+export async function waitForOffscreenRecorder(timeoutMs = 5000): Promise<void> {
+  await setupOffscreenDocument();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'RECORDER_PING' });
+      if (response === 'pong') return;
+    } catch {
+      // offscreen listener not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('Video recorder failed to initialize. Reload the extension and try again.');
+}
+
 export async function closeOffscreenDocument(): Promise<void> {
   const existing = await chrome.runtime.getContexts({
     contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],

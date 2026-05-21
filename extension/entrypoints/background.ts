@@ -1,9 +1,10 @@
 import type { AppState, Message } from '../lib/messaging';
 import { onMessage } from '../lib/messaging';
 import { acquireTabStreamId } from '../lib/capture';
-import { setupOffscreenDocument } from '../lib/offscreen-manager';
+import { setupOffscreenDocument, waitForOffscreenRecorder } from '../lib/offscreen-manager';
 import { arrayBufferToBase64, saveRecording, updateRecording } from '../lib/storage';
 import { isSupabaseConfigured, uploadRecording } from '../lib/supabase';
+import { sendToTab } from '../lib/tab-messaging';
 import type { RecordingOptions, StoredRecording } from '../lib/types';
 
 let state: AppState = { phase: 'idle' };
@@ -33,41 +34,25 @@ function clearPendingCapture(): void {
   pendingStreamId = undefined;
 }
 
+function sendToOffscreen(message: Message): void {
+  chrome.runtime.sendMessage(message).catch(() => {});
+}
+
 async function injectOverlay(
   tabId: number,
   options: Pick<RecordingOptions, 'webcam' | 'mic'>,
 ): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['/content-scripts/content.js'],
-    });
-  } catch {
-    // Content script may already be registered on this tab
-  }
-  try {
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'OVERLAY_SHOW',
-      options,
-    } as Message);
-  } catch {
-    // Overlay is optional — recording should still work
-  }
+  await sendToTab(tabId, { type: 'OVERLAY_SHOW', options });
 }
 
 async function hideOverlay(tabId: number): Promise<void> {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'OVERLAY_HIDE' } as Message);
-  } catch {
-    // tab may be closed
-  }
+  await sendToTab(tabId, { type: 'OVERLAY_HIDE' });
 }
 
 async function startCountdown(options: RecordingOptions): Promise<void> {
   recordingTabId = options.tabId;
   clearPendingCapture();
 
-  // getMediaStreamId must run during the user gesture — before the countdown
   if (options.mode === 'tab') {
     try {
       pendingStreamId = await acquireTabStreamId(options.tabId);
@@ -95,17 +80,13 @@ async function startCountdown(options: RecordingOptions): Promise<void> {
   });
 
   let remaining = options.countdownSec;
-  chrome.tabs
-    .sendMessage(options.tabId, { type: 'COUNTDOWN_TICK', remaining } as Message)
-    .catch(() => {});
+  await sendToTab(options.tabId, { type: 'COUNTDOWN_TICK', remaining });
 
   countdownTimer = setInterval(async () => {
     remaining -= 1;
     if (remaining > 0) {
       setState({ countdownRemaining: remaining });
-      chrome.tabs
-        .sendMessage(options.tabId, { type: 'COUNTDOWN_TICK', remaining } as Message)
-        .catch(() => {});
+      await sendToTab(options.tabId, { type: 'COUNTDOWN_TICK', remaining });
       return;
     }
 
@@ -136,7 +117,7 @@ function chooseDesktopStream(
 }
 
 async function beginRecording(options: RecordingOptions): Promise<void> {
-  await setupOffscreenDocument();
+  await waitForOffscreenRecorder();
   await injectOverlay(options.tabId, { webcam: options.webcam, mic: options.mic });
 
   let streamId: string | undefined;
@@ -153,11 +134,11 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
     streamId = await chooseDesktopStream(tab, sources);
   }
 
-  chrome.runtime.sendMessage({
+  sendToOffscreen({
     type: 'OFFSCREEN_START',
     options,
     streamId,
-  } satisfies Message);
+  });
 
   const startedAt = Date.now();
   setState({
@@ -169,17 +150,12 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
     error: undefined,
   });
 
-  chrome.runtime.sendMessage({ type: 'RECORDING_STARTED', startedAt } as Message).catch(() => {});
-
   elapsedTimer = setInterval(() => {
     if (state.paused || !state.startedAt) return;
     const elapsedMs = Date.now() - state.startedAt;
     setState({ elapsedMs });
     if (recordingTabId) {
-      chrome.tabs.sendMessage(recordingTabId, {
-        type: 'OVERLAY_TICK',
-        elapsedMs,
-      } as Message).catch(() => {});
+      void sendToTab(recordingTabId, { type: 'OVERLAY_TICK', elapsedMs });
     }
   }, 250);
 }
@@ -311,36 +287,30 @@ export default defineBackground(() => {
       }
 
       case 'STOP_RECORDING':
-        chrome.runtime.sendMessage({ type: 'STOP_RECORDING' } as Message);
+        sendToOffscreen({ type: 'OFFSCREEN_STOP' });
         setState({ phase: 'processing' });
         break;
 
       case 'PAUSE_RECORDING':
-        chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING' } as Message);
+        sendToOffscreen({ type: 'OFFSCREEN_PAUSE' });
         setState({ paused: true });
         if (recordingTabId) {
-          chrome.tabs.sendMessage(recordingTabId, {
-            type: 'OVERLAY_PAUSED',
-            paused: true,
-          } as Message).catch(() => {});
+          await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: true });
         }
         break;
 
       case 'RESUME_RECORDING':
-        chrome.runtime.sendMessage({ type: 'RESUME_RECORDING' } as Message);
+        sendToOffscreen({ type: 'OFFSCREEN_RESUME' });
         setState({ paused: false });
         if (recordingTabId) {
-          chrome.tabs.sendMessage(recordingTabId, {
-            type: 'OVERLAY_PAUSED',
-            paused: false,
-          } as Message).catch(() => {});
+          await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: false });
         }
         break;
 
       case 'CANCEL_RECORDING':
         clearTimers();
         clearPendingCapture();
-        chrome.runtime.sendMessage({ type: 'CANCEL_RECORDING' } as Message);
+        sendToOffscreen({ type: 'OFFSCREEN_CANCEL' });
         if (recordingTabId) await hideOverlay(recordingTabId);
         recordingTabId = undefined;
         setState({
@@ -353,7 +323,7 @@ export default defineBackground(() => {
         break;
 
       case 'RECORDING_COMPLETE':
-        if (sender.id !== chrome.runtime.id) return;
+        if (sender.url && !sender.url.includes('offscreen')) return;
         await handleRecordingComplete(
           {
             id: message.meta.id,
@@ -376,14 +346,14 @@ export default defineBackground(() => {
         setState({ phase: 'idle', error: message.error });
         break;
 
-      case 'UPLOAD_RECORDING':
-        if (state.currentRecording) void uploadInBackground(state.currentRecording);
+      case 'MIC_UNAVAILABLE':
+        if (state.phase === 'recording') {
+          setState({ error: 'Microphone blocked — recording without mic audio.' });
+        }
         break;
 
-      case 'RECORDER_PING':
-        if (sender.url?.includes('offscreen')) {
-          chrome.runtime.sendMessage({ type: 'RECORDER_PONG' } as Message);
-        }
+      case 'UPLOAD_RECORDING':
+        if (state.currentRecording) void uploadInBackground(state.currentRecording);
         break;
     }
   });
