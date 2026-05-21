@@ -1,5 +1,6 @@
 import type { AppState, Message } from '../lib/messaging';
 import { onMessage } from '../lib/messaging';
+import { acquireTabStreamId } from '../lib/capture';
 import { setupOffscreenDocument } from '../lib/offscreen-manager';
 import { arrayBufferToBase64, saveRecording, updateRecording } from '../lib/storage';
 import { isSupabaseConfigured, uploadRecording } from '../lib/supabase';
@@ -9,7 +10,7 @@ let state: AppState = { phase: 'idle' };
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let recordingTabId: number | undefined;
-let pendingOptions: RecordingOptions | undefined;
+let pendingStreamId: string | undefined;
 
 function broadcastState(): void {
   const msg: Message = { type: 'STATE_UPDATE', state: { ...state } };
@@ -28,7 +29,14 @@ function clearTimers(): void {
   elapsedTimer = null;
 }
 
-async function injectOverlay(tabId: number, options: Pick<RecordingOptions, 'webcam' | 'mic'>): Promise<void> {
+function clearPendingCapture(): void {
+  pendingStreamId = undefined;
+}
+
+async function injectOverlay(
+  tabId: number,
+  options: Pick<RecordingOptions, 'webcam' | 'mic'>,
+): Promise<void> {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -37,10 +45,14 @@ async function injectOverlay(tabId: number, options: Pick<RecordingOptions, 'web
   } catch {
     // Content script may already be registered on this tab
   }
-  await chrome.tabs.sendMessage(tabId, {
-    type: 'OVERLAY_SHOW',
-    options,
-  } as Message);
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'OVERLAY_SHOW',
+      options,
+    } as Message);
+  } catch {
+    // Overlay is optional — recording should still work
+  }
 }
 
 async function hideOverlay(tabId: number): Promise<void> {
@@ -52,8 +64,19 @@ async function hideOverlay(tabId: number): Promise<void> {
 }
 
 async function startCountdown(options: RecordingOptions): Promise<void> {
-  pendingOptions = options;
   recordingTabId = options.tabId;
+  clearPendingCapture();
+
+  // getMediaStreamId must run during the user gesture — before the countdown
+  if (options.mode === 'tab') {
+    try {
+      pendingStreamId = await acquireTabStreamId(options.tabId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Tab capture failed';
+      setState({ phase: 'idle', error: message });
+      return;
+    }
+  }
 
   if (options.countdownSec > 0 && options.mode === 'tab') {
     await injectOverlay(options.tabId, { webcam: false, mic: options.mic });
@@ -87,7 +110,16 @@ async function startCountdown(options: RecordingOptions): Promise<void> {
     }
 
     clearTimers();
-    await beginRecording(options);
+    try {
+      await beginRecording(options);
+    } catch (err) {
+      clearPendingCapture();
+      if (recordingTabId) await hideOverlay(recordingTabId);
+      setState({
+        phase: 'idle',
+        error: err instanceof Error ? err.message : 'Failed to start recording',
+      });
+    }
   }, 1000);
 }
 
@@ -109,7 +141,11 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
 
   let streamId: string | undefined;
   if (options.mode === 'tab') {
-    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: options.tabId });
+    streamId = pendingStreamId;
+    clearPendingCapture();
+    if (!streamId) {
+      throw new Error('Tab capture expired. Click Record again.');
+    }
   } else {
     const sources: ('screen' | 'window' | 'tab')[] =
       options.mode === 'screen' ? ['screen'] : ['window', 'tab'];
@@ -118,10 +154,10 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
   }
 
   chrome.runtime.sendMessage({
-    type: 'START_RECORDING',
+    type: 'OFFSCREEN_START',
     options,
     streamId,
-  } satisfies Message & { streamId?: string });
+  } satisfies Message);
 
   const startedAt = Date.now();
   setState({
@@ -130,6 +166,7 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
     elapsedMs: 0,
     paused: false,
     recordingTabId: options.tabId,
+    error: undefined,
   });
 
   chrome.runtime.sendMessage({ type: 'RECORDING_STARTED', startedAt } as Message).catch(() => {});
@@ -152,6 +189,7 @@ async function handleRecordingComplete(
   buffer: ArrayBuffer,
 ): Promise<void> {
   clearTimers();
+  clearPendingCapture();
   if (recordingTabId) await hideOverlay(recordingTabId);
 
   const dataBase64 = arrayBufferToBase64(buffer);
@@ -260,7 +298,15 @@ export default defineBackground(() => {
 
       case 'START_RECORDING': {
         if (state.phase !== 'idle' && state.phase !== 'preview') return;
-        await startCountdown(message.options);
+        try {
+          await startCountdown(message.options);
+        } catch (err) {
+          clearPendingCapture();
+          setState({
+            phase: 'idle',
+            error: err instanceof Error ? err.message : 'Failed to start recording',
+          });
+        }
         break;
       }
 
@@ -293,10 +339,10 @@ export default defineBackground(() => {
 
       case 'CANCEL_RECORDING':
         clearTimers();
+        clearPendingCapture();
         chrome.runtime.sendMessage({ type: 'CANCEL_RECORDING' } as Message);
         if (recordingTabId) await hideOverlay(recordingTabId);
         recordingTabId = undefined;
-        pendingOptions = undefined;
         setState({
           phase: 'idle',
           recordingTabId: undefined,
@@ -325,6 +371,7 @@ export default defineBackground(() => {
 
       case 'RECORDING_ERROR':
         clearTimers();
+        clearPendingCapture();
         if (recordingTabId) await hideOverlay(recordingTabId);
         setState({ phase: 'idle', error: message.error });
         break;
@@ -343,17 +390,23 @@ export default defineBackground(() => {
 
   chrome.commands.onCommand.addListener(async (command) => {
     if (command !== 'record-tab') return;
-    const tab = await getActiveTab();
-    if (!tab.id) return;
-    if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
-    await startCountdown({
-      mode: 'tab',
-      mic: true,
-      webcam: false,
-      tabId: tab.id,
-      tabTitle: tab.title ?? 'Recording',
-      countdownSec: 3,
-    });
+    try {
+      const tab = await getActiveTab();
+      if (!tab.id) return;
+      if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
+      await startCountdown({
+        mode: 'tab',
+        mic: true,
+        webcam: false,
+        tabId: tab.id,
+        tabTitle: tab.title ?? 'Recording',
+        countdownSec: 3,
+      });
+    } catch (err) {
+      setState({
+        phase: 'idle',
+        error: err instanceof Error ? err.message : 'Failed to start recording',
+      });
+    }
   });
-
 });

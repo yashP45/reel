@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Toggle } from '../../components/Toggle';
 import type { AppState, Message } from '../../lib/messaging';
 import { sendMessage } from '../../lib/messaging';
+import { isCapturableUrl } from '../../lib/capture';
 import { base64ToBlob, getLibrary } from '../../lib/storage';
 import { isSupabaseConfigured } from '../../lib/supabase';
 import type { RecordMode, StoredRecording } from '../../lib/types';
@@ -45,10 +46,18 @@ export default function App() {
   }, [refreshLibrary]);
 
   const startRecording = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab?.id) return;
 
-      if (mode === 'tab') {
+    if (mode === 'tab' && !isCapturableUrl(tab.url)) {
+      setState({
+        phase: 'idle',
+        error: 'Cannot record this page. Open a regular website (https://) first.',
+      });
+      return;
+    }
+
+    if (mode === 'tab') {
       await sendMessage({
         type: 'START_RECORDING',
         options: {

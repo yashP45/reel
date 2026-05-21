@@ -17,20 +17,23 @@ function stopAllStreams(): void {
 
 async function getCapturedStream(streamId: string, source: 'tab' | 'desktop'): Promise<MediaStream> {
   const mediaSource = source === 'tab' ? 'tab' : 'desktop';
-  return navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: mediaSource,
-        chromeMediaSourceId: streamId,
-      },
-    } as MediaTrackConstraints,
-    video: {
-      mandatory: {
-        chromeMediaSource: mediaSource,
-        chromeMediaSourceId: streamId,
-      },
-    } as MediaTrackConstraints,
-  });
+  const mandatory = {
+    chromeMediaSource: mediaSource,
+    chromeMediaSourceId: streamId,
+  };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: { mandatory } as MediaTrackConstraints,
+      video: { mandatory } as MediaTrackConstraints,
+    });
+  } catch (audioErr) {
+    if (source !== 'tab') throw audioErr;
+    // Some tabs have no audio track — capture video only
+    return navigator.mediaDevices.getUserMedia({
+      video: { mandatory } as MediaTrackConstraints,
+    });
+  }
 }
 
 async function getDisplayStream(mode: 'window' | 'screen'): Promise<MediaStream> {
@@ -136,7 +139,7 @@ function stopRecording(): void {
 
 chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }) => {
   switch (message.type) {
-    case 'START_RECORDING':
+    case 'OFFSCREEN_START':
       startRecording(message.options, message.streamId).catch((err) => {
         chrome.runtime.sendMessage({
           type: 'RECORDING_ERROR',

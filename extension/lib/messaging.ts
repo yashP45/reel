@@ -4,6 +4,7 @@ export type Message =
   | { type: 'GET_STATE' }
   | { type: 'STATE_UPDATE'; state: AppState }
   | { type: 'START_RECORDING'; options: RecordingOptions }
+  | { type: 'OFFSCREEN_START'; options: RecordingOptions; streamId?: string }
   | { type: 'COUNTDOWN_TICK'; remaining: number }
   | { type: 'RECORDING_STARTED'; startedAt: number }
   | { type: 'PAUSE_RECORDING' }
