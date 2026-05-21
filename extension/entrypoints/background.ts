@@ -92,11 +92,11 @@ async function startCountdown(options: RecordingOptions): Promise<void> {
 }
 
 function chooseDesktopStream(
-  tabId: number,
+  tab: chrome.tabs.Tab,
   sources: ('screen' | 'window' | 'tab')[],
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    chrome.desktopCapture.chooseDesktopMedia(sources, { targetTabId: tabId }, (streamId) => {
+    chrome.desktopCapture.chooseDesktopMedia(sources, tab, (streamId) => {
       if (!streamId) reject(new Error('Screen capture cancelled'));
       else resolve(streamId);
     });
@@ -113,7 +113,8 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
   } else {
     const sources: ('screen' | 'window' | 'tab')[] =
       options.mode === 'screen' ? ['screen'] : ['window', 'tab'];
-    streamId = await chooseDesktopStream(options.tabId, sources);
+    const tab = await chrome.tabs.get(options.tabId);
+    streamId = await chooseDesktopStream(tab, sources);
   }
 
   chrome.runtime.sendMessage({
@@ -253,7 +254,7 @@ export default defineBackground(() => {
 
       case 'OPEN_SIDE_PANEL': {
         const tab = await getActiveTab();
-        await chrome.sidePanel.open({ tabId: tab.id });
+        if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
         break;
       }
 
@@ -344,7 +345,7 @@ export default defineBackground(() => {
     if (command !== 'record-tab') return;
     const tab = await getActiveTab();
     if (!tab.id) return;
-    await chrome.sidePanel.open({ tabId: tab.id });
+    if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
     await startCountdown({
       mode: 'tab',
       mic: true,
