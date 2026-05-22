@@ -1,4 +1,5 @@
-export type RecordMode = 'tab' | 'window' | 'screen';
+/** User picks tab/window/screen in Chrome's native share dialog */
+export type RecordMode = 'picker';
 
 export type RecorderPhase =
   | 'idle'
@@ -25,15 +26,14 @@ export interface RecordingMeta {
   createdAt: number;
   mode: RecordMode;
   mimeType: string;
+  fileExtension: 'webm';
   sizeBytes: number;
 }
 
 export interface StoredRecording extends RecordingMeta {
-  /** base64-encoded webm for local preview/library */
-  dataBase64?: string;
   shareUrl?: string;
   storagePath?: string;
-  uploadStatus: 'pending' | 'uploading' | 'done' | 'error';
+  uploadStatus: 'pending' | 'uploading' | 'done' | 'error' | 'local';
   uploadError?: string;
 }
 

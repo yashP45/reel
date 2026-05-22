@@ -16,7 +16,8 @@
         </div>
       </header>
       <main>
-        <video id="player" controls playsinline></video>
+        <p id="loading" class="meta">Loading video…</p>
+        <video id="player" controls playsinline preload="auto" class="hidden"></video>
         <p id="error" class="error hidden"></p>
       </main>
     </div>

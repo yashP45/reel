@@ -15,11 +15,13 @@ alter table public.recordings enable row level security;
 -- Public read for share links (take-home; production would use signed URLs)
 create policy "recordings_public_read"
   on public.recordings for select
+  to anon, authenticated
   using (true);
 
 -- Allow anonymous inserts from extension (scoped by session_id in app logic)
 create policy "recordings_anon_insert"
   on public.recordings for insert
+  to anon, authenticated
   with check (true);
 
 -- Storage bucket: create "recordings" in Supabase Dashboard (public bucket for take-home)

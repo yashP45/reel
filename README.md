@@ -48,37 +48,57 @@ Or run `scripts/package-extension.ps1` from the repo root.
 ### 2. Supabase (share links)
 
 1. Create a [Supabase](https://supabase.com) project.
-2. Run SQL in [`supabase/migrations/`](supabase/migrations/) (table + storage policies).
-3. Create a **public** Storage bucket named `recordings`.
-4. Copy `extension/.env.example` → `extension/.env`:
+2. In **SQL Editor**, run all of [`supabase/setup.sql`](supabase/setup.sql) (creates table + RLS policies).
+3. In **Storage**, create a **public** bucket named `recordings` (if it doesn't exist yet).
+4. If upload still fails with RLS errors, re-run [`supabase/migrations/003_fix_rls_policies.sql`](supabase/migrations/003_fix_rls_policies.sql).
+5. Copy `extension/.env.example` → `extension/.env`:
 
 ```env
 VITE_SUPABASE_URL=https://xxxx.supabase.co
 VITE_SUPABASE_ANON_KEY=eyJ...
-VITE_SHARE_PAGE_URL=http://localhost:5173
+VITE_SHARE_PAGE_URL=http://localhost:3000
 ```
 
-5. Rebuild the extension: `npm run build` in `extension/`.
+6. Rebuild the extension: `npm run build` in `extension/`.
 
 Without Supabase, recording and **download** still work; share links show a setup hint.
 
-### 3. Share / watch page
+### 3. Web app (watch page + dashboard + email sign-in)
 
 ```bash
-cd share-page
-cp .env.example .env
+cd web
+cp .env.example .env.local
 npm install
 npm run dev
 ```
 
-Deploy to Vercel/Netlify (see `share-page/vercel.json` for `/watch/:id` routing). Set `VITE_SHARE_PAGE_URL` to your deployed URL.
+Open [http://localhost:3000](http://localhost:3000). Routes:
+
+- `/watch/[id]` — public video player
+- `/login` — email + password (no email sent on each sign-in)
+- `/dashboard` — your recordings (copy link, delete)
+
+**Supabase auth setup:**
+
+1. Dashboard → **Authentication** → **Providers** → **Email** → enable **Email** (with password).
+2. For dev, turn **off** “Confirm email” so sign-up works without a confirmation mail.
+3. **Extension auth:** Copy your extension ID from `chrome://extensions` into `NEXT_PUBLIC_EXTENSION_ID` in `web/.env.local`. Sign in via extension → `/login?ext=1` → email + password → extension connects.
+
+See [`web/AUTH.md`](web/AUTH.md) for details.
+
+Run [`supabase/migrations/004_auth_users.sql`](supabase/migrations/004_auth_users.sql) after `setup.sql` for dashboard + owner RLS.
+
+Set `VITE_SHARE_PAGE_URL=http://localhost:3000` in `extension/.env` and rebuild.
+
+Legacy Vite share page remains in `share-page/` but Next.js `web/` is the primary app.
 
 ## Project structure
 
 ```
 loom/
 ├── extension/          # WXT + React + Tailwind (MV3)
-├── share-page/         # Public video watch page
+├── web/                # Next.js watch + dashboard + auth
+├── share-page/         # Legacy Vite watch page
 ├── supabase/           # SQL migrations
 ├── REASONING.md        # Design & tradeoffs (30% rubric)
 └── scripts/            # Zip packaging

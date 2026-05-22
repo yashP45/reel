@@ -1,0 +1,6 @@
+{
+  "/login/page": "app/login/page.js",
+  "/auth/extension-callback/page": "app/auth/extension-callback/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/watch/[id]/page": "app/watch/[id]/page.js"
+}

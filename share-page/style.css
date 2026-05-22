@@ -63,3 +63,7 @@ video {
 .hidden {
   display: none;
 }
+
+video.hidden {
+  display: none;
+}

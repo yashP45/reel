@@ -1,21 +1,92 @@
 import type { AppState, Message } from '../lib/messaging';
 import { onMessage } from '../lib/messaging';
-import { acquireTabStreamId } from '../lib/capture';
-import { setupOffscreenDocument, waitForOffscreenRecorder } from '../lib/offscreen-manager';
-import { arrayBufferToBase64, saveRecording, updateRecording } from '../lib/storage';
-import { isSupabaseConfigured, uploadRecording } from '../lib/supabase';
+import { getTargetTabInfo, isCapturableUrl, resolveRecordingTab } from '../lib/capture';
+import { saveRecordingBlob, getRecordingBlob } from '../lib/blob-store';
+import { finalizeRecordingBlob } from '../lib/fix-webm-blob';
+import { isSupabaseConfigured } from '../lib/config';
+import { MIN_RECORDING_BYTES } from '../lib/recording-format';
+import { getRecording, saveRecording, updateRecording } from '../lib/storage';
+import { setAuthSession, type AuthSession } from '../lib/auth-storage';
+import { uploadRecording } from '../lib/supabase';
 import { sendToTab } from '../lib/tab-messaging';
+import { setWebcamSessionActive } from '../lib/webcam-session';
 import type { RecordingOptions, StoredRecording } from '../lib/types';
 
 let state: AppState = { phase: 'idle' };
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let recordingTabId: number | undefined;
-let pendingStreamId: string | undefined;
+let webcamHostTabId: number | undefined;
+let recordingOverlayOptions: Pick<RecordingOptions, 'webcam' | 'mic'> = {
+  webcam: false,
+  mic: true,
+};
+
+async function stopWebcamBubble(): Promise<void> {
+  const tabIds = new Set<number>();
+  if (recordingTabId != null) tabIds.add(recordingTabId);
+  if (webcamHostTabId != null) tabIds.add(webcamHostTabId);
+  for (const id of tabIds) {
+    await sendToTab(id, { type: 'WEBCAM_STOP' });
+  }
+  webcamHostTabId = undefined;
+  setWebcamSessionActive(false);
+}
+
+async function hideAllOverlays(): Promise<void> {
+  if (recordingTabId != null) await hideOverlay(recordingTabId);
+  await stopWebcamBubble();
+  recordingTabId = undefined;
+}
+
+function tabUrl(tab: chrome.tabs.Tab): string | undefined {
+  return tab.url ?? tab.pendingUrl;
+}
+
+function isRecordingPhase(): boolean {
+  return state.phase === 'recording' || state.phase === 'paused';
+}
+
+async function moveOverlayToTab(newTabId: number): Promise<void> {
+  if (newTabId === recordingTabId) return;
+
+  const tab = await chrome.tabs.get(newTabId);
+  if (!isCapturableUrl(tabUrl(tab))) return;
+
+  const oldTabId = recordingTabId;
+  recordingTabId = newTabId;
+
+  if (oldTabId != null) {
+    await hideOverlay(oldTabId);
+    if (recordingOverlayOptions.webcam) {
+      await sendToTab(oldTabId, { type: 'WEBCAM_REMOVE_IFRAME' });
+    }
+  }
+  await injectOverlay(newTabId, { mic: recordingOverlayOptions.mic });
+  if (recordingOverlayOptions.webcam) {
+    await sendToTab(newTabId, { type: 'WEBCAM_RELOCATE' });
+    webcamHostTabId = newTabId;
+  }
+
+  if (state.elapsedMs != null) {
+    await sendToTab(newTabId, { type: 'OVERLAY_TICK', elapsedMs: state.elapsedMs });
+  }
+  if (state.paused) {
+    await sendToTab(newTabId, { type: 'OVERLAY_PAUSED', paused: true });
+  }
+}
+
+async function onActiveTabChanged(tabId: number): Promise<void> {
+  if (!isRecordingPhase()) return;
+  try {
+    await moveOverlayToTab(tabId);
+  } catch {
+    // Tab may not be injectable yet
+  }
+}
 
 function broadcastState(): void {
-  const msg: Message = { type: 'STATE_UPDATE', state: { ...state } };
-  chrome.runtime.sendMessage(msg).catch(() => {});
+  chrome.runtime.sendMessage({ type: 'STATE_UPDATE', state: { ...state } } satisfies Message).catch(() => {});
 }
 
 function setState(patch: Partial<AppState>): void {
@@ -30,115 +101,32 @@ function clearTimers(): void {
   elapsedTimer = null;
 }
 
-function clearPendingCapture(): void {
-  pendingStreamId = undefined;
-}
-
-function sendToOffscreen(message: Message): void {
-  chrome.runtime.sendMessage(message).catch(() => {});
-}
-
-async function injectOverlay(
-  tabId: number,
-  options: Pick<RecordingOptions, 'webcam' | 'mic'>,
-): Promise<void> {
-  await sendToTab(tabId, { type: 'OVERLAY_SHOW', options });
+async function injectOverlay(tabId: number, options: Pick<RecordingOptions, 'mic'>): Promise<void> {
+  await new Promise((r) => setTimeout(r, 300));
+  await sendToTab(tabId, {
+    type: 'OVERLAY_SHOW',
+    options: { mic: options.mic },
+  });
 }
 
 async function hideOverlay(tabId: number): Promise<void> {
   await sendToTab(tabId, { type: 'OVERLAY_HIDE' });
 }
 
-async function startCountdown(options: RecordingOptions): Promise<void> {
-  recordingTabId = options.tabId;
-  clearPendingCapture();
+async function onRecordingStarted(
+  tabId: number,
+  title: string,
+  options: Pick<RecordingOptions, 'webcam' | 'mic'>,
+): Promise<void> {
+  recordingOverlayOptions = { webcam: options.webcam, mic: options.mic };
+  recordingTabId = tabId;
+  void injectOverlay(tabId, { mic: options.mic });
 
-  if (options.mode === 'tab') {
-    try {
-      pendingStreamId = await acquireTabStreamId(options.tabId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Tab capture failed';
-      setState({ phase: 'idle', error: message });
-      return;
-    }
+  if (options.webcam) {
+    webcamHostTabId = tabId;
+    setWebcamSessionActive(true);
+    void sendToTab(tabId, { type: 'WEBCAM_START' });
   }
-
-  if (options.countdownSec > 0 && options.mode === 'tab') {
-    await injectOverlay(options.tabId, { webcam: false, mic: options.mic });
-  }
-
-  if (options.countdownSec <= 0) {
-    await beginRecording(options);
-    return;
-  }
-
-  setState({
-    phase: 'countdown',
-    recordingTabId: options.tabId,
-    countdownRemaining: options.countdownSec,
-    error: undefined,
-  });
-
-  let remaining = options.countdownSec;
-  await sendToTab(options.tabId, { type: 'COUNTDOWN_TICK', remaining });
-
-  countdownTimer = setInterval(async () => {
-    remaining -= 1;
-    if (remaining > 0) {
-      setState({ countdownRemaining: remaining });
-      await sendToTab(options.tabId, { type: 'COUNTDOWN_TICK', remaining });
-      return;
-    }
-
-    clearTimers();
-    try {
-      await beginRecording(options);
-    } catch (err) {
-      clearPendingCapture();
-      if (recordingTabId) await hideOverlay(recordingTabId);
-      setState({
-        phase: 'idle',
-        error: err instanceof Error ? err.message : 'Failed to start recording',
-      });
-    }
-  }, 1000);
-}
-
-function chooseDesktopStream(
-  tab: chrome.tabs.Tab,
-  sources: ('screen' | 'window' | 'tab')[],
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    chrome.desktopCapture.chooseDesktopMedia(sources, tab, (streamId) => {
-      if (!streamId) reject(new Error('Screen capture cancelled'));
-      else resolve(streamId);
-    });
-  });
-}
-
-async function beginRecording(options: RecordingOptions): Promise<void> {
-  await waitForOffscreenRecorder();
-  await injectOverlay(options.tabId, { webcam: options.webcam, mic: options.mic });
-
-  let streamId: string | undefined;
-  if (options.mode === 'tab') {
-    streamId = pendingStreamId;
-    clearPendingCapture();
-    if (!streamId) {
-      throw new Error('Tab capture expired. Click Record again.');
-    }
-  } else {
-    const sources: ('screen' | 'window' | 'tab')[] =
-      options.mode === 'screen' ? ['screen'] : ['window', 'tab'];
-    const tab = await chrome.tabs.get(options.tabId);
-    streamId = await chooseDesktopStream(tab, sources);
-  }
-
-  sendToOffscreen({
-    type: 'OFFSCREEN_START',
-    options,
-    streamId,
-  });
 
   const startedAt = Date.now();
   setState({
@@ -146,7 +134,7 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
     startedAt,
     elapsedMs: 0,
     paused: false,
-    recordingTabId: options.tabId,
+    recordingTabId: tabId,
     error: undefined,
   });
 
@@ -160,20 +148,58 @@ async function beginRecording(options: RecordingOptions): Promise<void> {
   }, 250);
 }
 
+async function prepareRecordingTab(
+  options: Pick<RecordingOptions, 'mic' | 'webcam' | 'tabTitle'>,
+): Promise<{ tabId: number; title: string }> {
+  const tab = await resolveRecordingTab();
+  recordingTabId = tab.id!;
+  setState({ phase: 'processing', error: undefined });
+  return { tabId: tab.id!, title: tab.title ?? options.tabTitle ?? 'Recording' };
+}
+
+function formatRecordingFailure(meta: StoredRecording, blobSize: number): string {
+  const secs = Math.round(meta.durationMs / 1000);
+  const expectedKb = Math.round(meta.sizeBytes / 1024);
+  const gotKb = Math.round(blobSize / 1024);
+
+  if (meta.sizeBytes >= MIN_RECORDING_BYTES && blobSize < MIN_RECORDING_BYTES) {
+    return `Recording data was lost after capture (${gotKb} KB received, ${expectedKb} KB recorded, ${secs}s). Reload the extension and try again.`;
+  }
+
+  return `No usable video was captured (${gotKb} KB after ${secs}s). Try Full screen mode, keep the shared window open, then stop.`;
+}
+
 async function handleRecordingComplete(
   meta: StoredRecording,
-  buffer: ArrayBuffer,
+  buffer?: ArrayBuffer,
 ): Promise<void> {
   clearTimers();
-  clearPendingCapture();
-  if (recordingTabId) await hideOverlay(recordingTabId);
+  await hideAllOverlays();
 
-  const dataBase64 = arrayBufferToBase64(buffer);
+  let blob: Blob | null = null;
+
+  if (buffer && buffer.byteLength > 0) {
+    blob = new Blob([buffer], { type: meta.mimeType });
+  } else {
+    blob = await getRecordingBlob(meta.id);
+  }
+
+  if (!blob || blob.size < MIN_RECORDING_BYTES) {
+    setState({
+      phase: 'idle',
+      error: formatRecordingFailure(meta, blob?.size ?? 0),
+      currentRecording: undefined,
+    });
+    return;
+  }
+
+  const finalized = await finalizeRecordingBlob(blob, meta.durationMs, meta.mimeType);
+  await saveRecordingBlob(meta.id, finalized);
+
   const recording: StoredRecording = {
     ...meta,
-    dataBase64,
-    uploadStatus: isSupabaseConfigured() ? 'pending' : 'error',
-    uploadError: isSupabaseConfigured() ? undefined : 'Supabase not configured',
+    sizeBytes: finalized.size,
+    uploadStatus: isSupabaseConfigured() ? 'pending' : 'local',
   };
 
   await saveRecording(recording);
@@ -193,7 +219,24 @@ async function handleRecordingComplete(
 }
 
 async function uploadInBackground(recording: StoredRecording): Promise<void> {
-  if (!recording.dataBase64) return;
+  const blob = await getRecordingBlob(recording.id);
+  if (!blob) return;
+
+  if (blob.size < MIN_RECORDING_BYTES) {
+    const message = 'Recording file is too small to upload. Record again.';
+    await updateRecording(recording.id, { uploadStatus: 'error', uploadError: message });
+    setState({
+      phase: 'preview',
+      uploadProgress: {
+        recordingId: recording.id,
+        percent: 0,
+        status: 'error',
+        error: message,
+      },
+      error: message,
+    });
+    return;
+  }
 
   setState({
     phase: 'uploading',
@@ -203,11 +246,6 @@ async function uploadInBackground(recording: StoredRecording): Promise<void> {
   await updateRecording(recording.id, { uploadStatus: 'uploading' });
 
   try {
-    const binary = atob(recording.dataBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: recording.mimeType });
-
     const { shareUrl, storagePath } = await uploadRecording(recording, blob, (percent) => {
       const progress = { recordingId: recording.id, percent, status: 'uploading' as const };
       setState({ uploadProgress: progress });
@@ -235,19 +273,36 @@ async function uploadInBackground(recording: StoredRecording): Promise<void> {
     chrome.runtime.sendMessage({ type: 'UPLOAD_PROGRESS', progress } as Message).catch(() => {});
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Upload failed';
-    await updateRecording(recording.id, { uploadStatus: 'error', uploadError: message });
-    const progress = {
-      recordingId: recording.id,
-      percent: 0,
-      status: 'error' as const,
-      error: message,
-    };
+    const updated = await updateRecording(recording.id, {
+      uploadStatus: 'error',
+      uploadError: message,
+    });
     setState({
       phase: 'preview',
-      uploadProgress: progress,
+      currentRecording: updated ?? {
+        ...recording,
+        uploadStatus: 'error',
+        uploadError: message,
+      },
+      uploadProgress: {
+        recordingId: recording.id,
+        percent: 0,
+        status: 'error',
+        error: message,
+      },
       error: message,
     });
-    chrome.runtime.sendMessage({ type: 'UPLOAD_PROGRESS', progress } as Message).catch(() => {});
+    chrome.runtime
+      .sendMessage({
+        type: 'UPLOAD_PROGRESS',
+        progress: {
+          recordingId: recording.id,
+          percent: 0,
+          status: 'error',
+          error: message,
+        },
+      } as Message)
+      .catch(() => {});
   }
 }
 
@@ -260,24 +315,37 @@ async function getActiveTab(): Promise<chrome.tabs.Tab> {
 export default defineBackground(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
+  chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'REEL_AUTH_SESSION' && message.session) {
+      void setAuthSession(message.session as AuthSession).then(() => sendResponse({ ok: true }));
+      return true;
+    }
+    return false;
+  });
+
   onMessage(async (message, sender) => {
     switch (message.type) {
       case 'GET_STATE':
         broadcastState();
         break;
 
-      case 'OPEN_SIDE_PANEL': {
-        const tab = await getActiveTab();
-        if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
+      case 'GET_TARGET_TAB': {
+        const tab = await getTargetTabInfo();
+        chrome.runtime.sendMessage({ type: 'TARGET_TAB', tab } satisfies Message).catch(() => {});
         break;
       }
 
-      case 'START_RECORDING': {
-        if (state.phase !== 'idle' && state.phase !== 'preview') return;
+      case 'PREPARE_RECORDING': {
         try {
-          await startCountdown(message.options);
+          const tab = await prepareRecordingTab(message.options);
+          chrome.runtime
+            .sendMessage({
+              type: 'PREPARE_RECORDING_RESULT',
+              tabId: tab.tabId,
+              title: tab.title,
+            } satisfies Message)
+            .catch(() => {});
         } catch (err) {
-          clearPendingCapture();
           setState({
             phase: 'idle',
             error: err instanceof Error ? err.message : 'Failed to start recording',
@@ -286,33 +354,30 @@ export default defineBackground(() => {
         break;
       }
 
+      case 'RECORDING_STARTED':
+        await onRecordingStarted(message.tabId, message.title, {
+          webcam: message.webcam,
+          mic: message.mic,
+        });
+        break;
+
       case 'STOP_RECORDING':
-        sendToOffscreen({ type: 'OFFSCREEN_STOP' });
         setState({ phase: 'processing' });
         break;
 
       case 'PAUSE_RECORDING':
-        sendToOffscreen({ type: 'OFFSCREEN_PAUSE' });
         setState({ paused: true });
-        if (recordingTabId) {
-          await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: true });
-        }
+        if (recordingTabId) await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: true });
         break;
 
       case 'RESUME_RECORDING':
-        sendToOffscreen({ type: 'OFFSCREEN_RESUME' });
         setState({ paused: false });
-        if (recordingTabId) {
-          await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: false });
-        }
+        if (recordingTabId) await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: false });
         break;
 
       case 'CANCEL_RECORDING':
         clearTimers();
-        clearPendingCapture();
-        sendToOffscreen({ type: 'OFFSCREEN_CANCEL' });
-        if (recordingTabId) await hideOverlay(recordingTabId);
-        recordingTabId = undefined;
+        await hideAllOverlays();
         setState({
           phase: 'idle',
           recordingTabId: undefined,
@@ -322,8 +387,10 @@ export default defineBackground(() => {
         });
         break;
 
-      case 'RECORDING_COMPLETE':
-        if (sender.url && !sender.url.includes('offscreen')) return;
+      case 'RECORDING_COMPLETE': {
+        const fromPanel = sender.url?.includes('sidepanel');
+        const fromOffscreen = sender.url?.includes('offscreen');
+        if (!fromPanel && !fromOffscreen) return;
         await handleRecordingComplete(
           {
             id: message.meta.id,
@@ -332,17 +399,18 @@ export default defineBackground(() => {
             createdAt: message.meta.createdAt,
             mode: message.meta.mode,
             mimeType: message.meta.mimeType,
+            fileExtension: message.meta.fileExtension,
             sizeBytes: message.meta.sizeBytes,
             uploadStatus: 'pending',
           },
           message.buffer,
         );
         break;
+      }
 
       case 'RECORDING_ERROR':
         clearTimers();
-        clearPendingCapture();
-        if (recordingTabId) await hideOverlay(recordingTabId);
+        await hideAllOverlays();
         setState({ phase: 'idle', error: message.error });
         break;
 
@@ -352,9 +420,75 @@ export default defineBackground(() => {
         }
         break;
 
-      case 'UPLOAD_RECORDING':
-        if (state.currentRecording) void uploadInBackground(state.currentRecording);
+      case 'WEBCAM_UNAVAILABLE':
+        if (state.phase === 'recording') {
+          setState({ error: 'Webcam blocked — recording without camera bubble.' });
+        }
         break;
+
+      case 'UPLOAD_RECORDING': {
+        const id = message.recordingId ?? state.currentRecording?.id;
+        if (!id) break;
+        const rec =
+          state.currentRecording?.id === id
+            ? state.currentRecording
+            : await getRecording(id);
+        if (rec) {
+          if (state.currentRecording?.id !== id) {
+            setState({ phase: 'preview', currentRecording: rec });
+          }
+          void uploadInBackground(rec);
+        }
+        break;
+      }
+
+      case 'OPEN_RECORDING': {
+        const rec = await getRecording(message.recordingId);
+        if (!rec) break;
+        const uploadProgress =
+          rec.uploadStatus === 'error'
+            ? {
+                recordingId: rec.id,
+                percent: 0,
+                status: 'error' as const,
+                error: rec.uploadError ?? 'Upload failed',
+              }
+            : rec.uploadStatus === 'done' && rec.shareUrl
+              ? {
+                  recordingId: rec.id,
+                  percent: 100,
+                  status: 'done' as const,
+                  shareUrl: rec.shareUrl,
+                }
+              : undefined;
+        setState({
+          phase: 'preview',
+          currentRecording: rec,
+          uploadProgress,
+          error: rec.uploadStatus === 'error' ? rec.uploadError : undefined,
+        });
+        break;
+      }
+    }
+  });
+
+  chrome.tabs.onActivated.addListener((activeInfo) => {
+    void onActiveTabChanged(activeInfo.tabId);
+  });
+
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status !== 'complete' || !isRecordingPhase()) return;
+    void (async () => {
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (active?.id === tabId) await onActiveTabChanged(tabId);
+    })();
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (tabId !== webcamHostTabId) return;
+    webcamHostTabId = undefined;
+    if (isRecordingPhase()) {
+      setState({ error: 'Camera tab closed — webcam bubble ended.' });
     }
   });
 
@@ -363,15 +497,8 @@ export default defineBackground(() => {
     try {
       const tab = await getActiveTab();
       if (!tab.id) return;
-      if (tab.id != null) await chrome.sidePanel.open({ tabId: tab.id });
-      await startCountdown({
-        mode: 'tab',
-        mic: true,
-        webcam: false,
-        tabId: tab.id,
-        tabTitle: tab.title ?? 'Recording',
-        countdownSec: 3,
-      });
+      await chrome.sidePanel.open({ tabId: tab.id });
+      chrome.runtime.sendMessage({ type: 'PANEL_START_CAPTURE' } satisfies Message).catch(() => {});
     } catch (err) {
       setState({
         phase: 'idle',

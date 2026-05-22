@@ -8,6 +8,7 @@ export async function ensureContentScript(tabId: number): Promise<boolean> {
       const response = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PING' });
       if (response === 'pong') return true;
     } catch {
+      // Only inject once per tab load — avoid duplicate listeners / extra getUserMedia
       if (attempt === 0) {
         try {
           await chrome.scripting.executeScript({
@@ -19,7 +20,7 @@ export async function ensureContentScript(tabId: number): Promise<boolean> {
         }
       }
     }
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 80));
   }
   return false;
 }
