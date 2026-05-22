@@ -18,10 +18,12 @@ export type Message =
   | { type: 'CONTENT_PING' }
   | { type: 'MIC_UNAVAILABLE' }
   | { type: 'WEBCAM_UNAVAILABLE' }
+  | { type: 'WEBCAM_READY' }
   | { type: 'WEBCAM_START' }
   | { type: 'WEBCAM_STOP' }
   | { type: 'WEBCAM_RELOCATE' }
   | { type: 'WEBCAM_REMOVE_IFRAME' }
+  | { type: 'WEBCAM_MODE'; mode: 'pip' | 'iframe' }
   | { type: 'COUNTDOWN_TICK'; remaining: number }
   | { type: 'PAUSE_RECORDING' }
   | { type: 'RESUME_RECORDING' }
@@ -37,6 +39,7 @@ export type Message =
   | { type: 'OPEN_RECORDING'; recordingId: string }
   | { type: 'UPLOAD_PROGRESS'; progress: UploadProgress }
   | { type: 'OPEN_SIDE_PANEL' }
+  | { type: 'WEBCAM_TOGGLE_PREVIEW'; enabled: boolean }
   | { type: 'RECORDER_PING' }
   | { type: 'RECORDER_PONG' };
 

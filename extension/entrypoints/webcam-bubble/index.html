@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Reel Webcam</title>
+    <title>Reel Camera</title>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body {
@@ -11,17 +11,30 @@
         overflow: hidden;
         background: #111;
         border-radius: 50%;
+        border: 3px solid #6366f1;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
       }
       video {
         width: 100%;
         height: 100%;
         object-fit: cover;
         transform: scaleX(-1);
+        border-radius: 50%;
+      }
+      #placeholder {
+        display: none;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        color: #71717a;
       }
     </style>
   </head>
   <body>
     <video id="cam" autoplay muted playsinline></video>
+    <div id="placeholder">📷</div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

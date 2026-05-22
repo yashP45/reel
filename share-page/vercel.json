@@ -1,3 +1,0 @@
-{
-  "rewrites": [{ "source": "/watch/:id", "destination": "/index.html" }]
-}

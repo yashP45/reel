@@ -2,15 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Toggle } from '../../components/Toggle';
 import type { AppState, Message } from '../../lib/messaging';
 import { sendMessage } from '../../lib/messaging';
-import { getRecordingBlob, saveRecordingBlob } from '../../lib/blob-store';
-import {
-  cancelPanelRecording,
-  isPanelRecording,
-  pausePanelRecording,
-  resumePanelRecording,
-  startPanelRecording,
-  stopPanelRecording,
-} from '../../lib/panel-recorder';
+import { getRecordingBlob } from '../../lib/blob-store';
 import { isSupabaseConfigured, getSharePageUrl } from '../../lib/config';
 import { getAuthSession, clearAuthSession } from '../../lib/auth-storage';
 import type { AuthSession } from '../../lib/auth-storage';
@@ -89,43 +81,20 @@ export default function App() {
   }, []);
 
   const runPanelCapture = useCallback(() => {
-    if (captureBusy || isPanelRecording()) return;
+    if (captureBusy || state.phase !== 'idle') return;
     setCaptureBusy(true);
-
-    // getDisplayMedia must run in the same click turn — no await before startPanelRecording
-    void startPanelRecording(mic, {
-      onStarted: () => {
-        void (async () => {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          const tabId = tab?.id;
-          if (!tabId) {
-            cancelPanelRecording();
-            void sendMessage({ type: 'RECORDING_ERROR', error: 'No active tab for overlay.' });
-            return;
-          }
-          void sendMessage({
-            type: 'RECORDING_STARTED',
-            startedAt: Date.now(),
-            tabId,
-            title: tab.title ?? targetTab?.title ?? 'Recording',
-            mic,
-            webcam,
-          });
-        })();
-      },
-      onComplete: async (meta, buffer) => {
-        const blob = new Blob([buffer], { type: meta.mimeType });
-        await saveRecordingBlob(meta.id, blob);
-        void sendMessage({
-          type: 'RECORDING_COMPLETE',
-          meta: { ...meta, title: targetTab?.title ?? meta.title },
-        });
-      },
-      onError: (error) => {
-        void sendMessage({ type: 'RECORDING_ERROR', error });
+    void sendMessage({
+      type: 'START_RECORDING',
+      options: {
+        mode: 'picker',
+        mic,
+        webcam,
+        tabId: 0,
+        tabTitle: targetTab?.title ?? 'Recording',
+        countdownSec: 0,
       },
     }).finally(() => setCaptureBusy(false));
-  }, [captureBusy, mic, webcam, targetTab?.title]);
+  }, [captureBusy, mic, webcam, targetTab?.title, state.phase]);
 
   useEffect(() => {
     getAuthSession().then(setAuth);
@@ -148,18 +117,6 @@ export default function App() {
       if (message.type === 'STATE_UPDATE' && message.state.phase === 'idle' && captureBusy) {
         setCaptureBusy(false);
       }
-      if (message.type === 'STOP_RECORDING' && isPanelRecording()) {
-        stopPanelRecording();
-      }
-      if (message.type === 'PAUSE_RECORDING' && isPanelRecording()) {
-        pausePanelRecording();
-      }
-      if (message.type === 'RESUME_RECORDING' && isPanelRecording()) {
-        resumePanelRecording();
-      }
-      if (message.type === 'CANCEL_RECORDING') {
-        cancelPanelRecording();
-      }
     };
     chrome.runtime.onMessage.addListener(listener);
     const onFocus = () => {
@@ -176,24 +133,10 @@ export default function App() {
   const handleWebcamToggle = (enabled: boolean) => {
     setWebcam(enabled);
     setWebcamHint(null);
-    if (!enabled) return;
-
-    // Side panel often cannot access the camera — do not revert the toggle.
-    // Permission is requested on the active page when the overlay shows.
-    void navigator.mediaDevices
-      .getUserMedia({
-        video: { width: 320, height: 320, facingMode: 'user' },
-        audio: false,
-      })
-      .then((stream) => {
-        stream.getTracks().forEach((t) => t.stop());
-        setWebcamHint(null);
-      })
-      .catch(() => {
-        setWebcamHint(
-          'Camera is requested once when recording starts. The bubble stays on screen like Loom.',
-        );
-      });
+    void sendMessage({ type: 'WEBCAM_TOGGLE_PREVIEW', enabled });
+    if (enabled) {
+      setWebcamHint('Allow camera when prompted. Drag the bubble to move it.');
+    }
   };
 
   const openSignIn = () => {
@@ -346,7 +289,7 @@ export default function App() {
               />
               {webcam && (
                 <p className="text-xs text-zinc-500">
-                  Camera bubble floats on screen (one permission). Pause/stop bar follows the active tab.
+                  Floating bubble on the page (Picture-in-Picture when Chrome supports it). Drag to reposition.
                 </p>
               )}
               {webcamHint && (
@@ -392,7 +335,7 @@ export default function App() {
             </div>
             <p className="max-w-[260px] text-center text-sm text-zinc-500">
               {webcam
-                ? 'Webcam bubble stays visible while you browse. Controls follow the active tab.'
+                ? 'Camera bubble stays on the page (PiP when available). Controls follow the active tab.'
                 : 'Controls follow the active tab.'}{' '}
               Or use the buttons below.
             </p>
@@ -400,13 +343,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  if (state.paused) {
-                    resumePanelRecording();
-                    void sendMessage({ type: 'RESUME_RECORDING' });
-                  } else {
-                    pausePanelRecording();
-                    void sendMessage({ type: 'PAUSE_RECORDING' });
-                  }
+                  void sendMessage({
+                    type: state.paused ? 'RESUME_RECORDING' : 'PAUSE_RECORDING',
+                  });
                 }}
                 className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-medium hover:bg-zinc-800"
               >
@@ -414,10 +353,7 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  stopPanelRecording();
-                  void sendMessage({ type: 'STOP_RECORDING' });
-                }}
+                onClick={() => void sendMessage({ type: 'STOP_RECORDING' })}
                 className="rounded-lg bg-red-500 px-4 py-2 text-sm font-semibold text-white hover:bg-red-400"
               >
                 Stop

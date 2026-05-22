@@ -1,6 +1,6 @@
 import { saveRecordingBlob } from '../../lib/blob-store';
+import { finalizeRecordingBlob } from '../../lib/fix-webm-blob';
 import type { Message } from '../../lib/messaging';
-import { pumpStreamThroughCanvas } from '../../lib/stream-pump';
 import type { RecordingOptions } from '../../lib/types';
 import { MIN_RECORDING_BYTES, pickRecordingFormat } from '../../lib/recording-format';
 
@@ -8,32 +8,18 @@ let mediaRecorder: MediaRecorder | null = null;
 let recordedChunks: Blob[] = [];
 let displayStream: MediaStream | null = null;
 let micStream: MediaStream | null = null;
-let pumpStop: (() => void) | null = null;
+let chunkTimer: ReturnType<typeof setInterval> | null = null;
 let startedAt = 0;
 let currentOptions: RecordingOptions | null = null;
 let stopReason: 'user' | 'track-ended' | 'error' | null = null;
 
-const CAPTURE_ROOT_ID = 'reel-capture-root';
-
-function getCaptureRoot(): HTMLElement {
-  let root = document.getElementById(CAPTURE_ROOT_ID);
-  if (!root) {
-    root = document.createElement('div');
-    root.id = CAPTURE_ROOT_ID;
-    root.style.cssText =
-      'position:fixed;left:0;top:0;width:1280px;height:720px;overflow:hidden;pointer-events:none;opacity:0;z-index:-1;';
-    document.body.appendChild(root);
-  }
-  return root;
-}
-
-function stopPump(): void {
-  pumpStop?.();
-  pumpStop = null;
+function clearChunkTimer(): void {
+  if (chunkTimer) clearInterval(chunkTimer);
+  chunkTimer = null;
 }
 
 function stopAllStreams(): void {
-  stopPump();
+  clearChunkTimer();
   displayStream?.getTracks().forEach((t) => t.stop());
   micStream?.getTracks().forEach((t) => t.stop());
   displayStream = null;
@@ -45,7 +31,7 @@ function watchCaptureTracks(stream: MediaStream): void {
     track.onended = () => {
       if (stopReason === null && mediaRecorder?.state === 'recording') {
         stopReason = 'track-ended';
-        mediaRecorder.stop();
+        stopRecording();
       }
     };
   }
@@ -58,15 +44,29 @@ function trackEndedError(durationMs: number): string {
   return 'Capture stopped unexpectedly. Keep the shared window or screen open and try again.';
 }
 
-async function getDisplayPickerStream(): Promise<MediaStream> {
-  return navigator.mediaDevices.getDisplayMedia({
+async function getDisplayPickerStream(): Promise<{
+  stream: MediaStream;
+  displaySurface: string | undefined;
+}> {
+  const options: DisplayMediaStreamOptions = {
     video: {
       width: { ideal: 1280, max: 1920 },
       height: { ideal: 720, max: 1080 },
       frameRate: { ideal: 30, max: 30 },
     },
     audio: true,
-  });
+  };
+
+  if (typeof CaptureController !== 'undefined') {
+    const controller = new CaptureController();
+    // Switch to the tab/window the user picked (no-op for entire screen).
+    controller.setFocusBehavior('focus-captured-surface');
+    options.controller = controller;
+  }
+
+  const stream = await navigator.mediaDevices.getDisplayMedia(options);
+  const displaySurface = stream.getVideoTracks()[0]?.getSettings().displaySurface;
+  return { stream, displaySurface };
 }
 
 async function getDesktopStream(streamId: string): Promise<MediaStream> {
@@ -115,20 +115,7 @@ function createRecorder(stream: MediaStream): MediaRecorder {
   return new MediaRecorder(stream, { mimeType: 'video/webm' });
 }
 
-async function prepareDisplayStream(sourceStream: MediaStream): Promise<MediaStream> {
-  const videoTrack = sourceStream.getVideoTracks()[0];
-  if (!videoTrack) return sourceStream;
-
-  try {
-    const handle = await pumpStreamThroughCanvas(sourceStream, getCaptureRoot(), 30);
-    pumpStop = handle.stop;
-    return handle.stream;
-  } catch {
-    return sourceStream;
-  }
-}
-
-async function startRecording(options: RecordingOptions, streamId?: string): Promise<void> {
+async function startRecording(options: RecordingOptions, streamId?: string): Promise<string | undefined> {
   stopAllStreams();
   recordedChunks = [];
   currentOptions = options;
@@ -136,11 +123,14 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
   stopReason = null;
 
   let sourceStream: MediaStream;
+  let displaySurface: string | undefined;
   if (streamId) {
     sourceStream = await getDesktopStream(streamId);
   } else {
     try {
-      sourceStream = await getDisplayPickerStream();
+      const picked = await getDisplayPickerStream();
+      sourceStream = picked.stream;
+      displaySurface = picked.displaySurface;
     } catch (err) {
       const name = err instanceof Error ? err.name : '';
       if (name === 'NotAllowedError') {
@@ -152,11 +142,11 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
 
   watchCaptureTracks(sourceStream);
 
-  displayStream = await prepareDisplayStream(sourceStream);
-  displayStream = await maybeAddMic(displayStream, options.mic);
+  // Record the display stream directly — canvas re-encoding often yields 0 frames in offscreen.
+  displayStream = await maybeAddMic(sourceStream, options.mic);
 
   if (displayStream.getVideoTracks().length === 0) {
-    throw new Error('No video track from capture. Try Full screen mode and pick your monitor.');
+    throw new Error('No video track from capture. Try Entire screen and pick your monitor.');
   }
 
   mediaRecorder = createRecorder(displayStream);
@@ -166,20 +156,33 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
   };
 
   mediaRecorder.onstop = async () => {
-    await new Promise((r) => setTimeout(r, 150));
+    clearChunkTimer();
+    // Stop capture tracks first so Chrome's "Stop sharing" bar dismisses immediately.
+    stopAllStreams();
+    await new Promise((r) => setTimeout(r, 200));
 
     const mimeType = mediaRecorder?.mimeType || 'video/webm';
-    const blob = new Blob(recordedChunks, { type: mimeType });
+    let blob = new Blob(recordedChunks, { type: mimeType });
     const durationMs = Date.now() - startedAt;
     const mode = currentOptions?.mode ?? 'picker';
     const { extension } = pickRecordingFormat();
 
-    if (stopReason === 'track-ended' || (durationMs < 800 && blob.size < 4096)) {
+    if (stopReason === 'track-ended' && blob.size < MIN_RECORDING_BYTES) {
       chrome.runtime.sendMessage({
         type: 'RECORDING_ERROR',
         error: trackEndedError(durationMs),
       } satisfies Message);
-      stopAllStreams();
+      mediaRecorder = null;
+      currentOptions = null;
+      stopReason = null;
+      return;
+    }
+
+    if (durationMs < 800 && blob.size < 4096) {
+      chrome.runtime.sendMessage({
+        type: 'RECORDING_ERROR',
+        error: trackEndedError(durationMs),
+      } satisfies Message);
       mediaRecorder = null;
       currentOptions = null;
       stopReason = null;
@@ -191,14 +194,15 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
       const chunkCount = recordedChunks.length;
       chrome.runtime.sendMessage({
         type: 'RECORDING_ERROR',
-        error: `No video data captured (${blob.size} bytes, ${chunkCount} chunks, ${secs}s). Reload the extension, use Full screen mode, and pick the window or monitor you are recording.`,
+        error: `No video data captured (${blob.size} bytes, ${chunkCount} chunks, ${secs}s). Reload the extension, pick Entire screen, and keep the side panel open until you stop.`,
       } satisfies Message);
-      stopAllStreams();
       mediaRecorder = null;
       currentOptions = null;
       stopReason = null;
       return;
     }
+
+    blob = await finalizeRecordingBlob(blob, durationMs, mimeType);
 
     const id = crypto.randomUUID();
     await saveRecordingBlob(id, blob);
@@ -217,7 +221,6 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
       },
     } satisfies Message);
 
-    stopAllStreams();
     mediaRecorder = null;
     currentOptions = null;
     stopReason = null;
@@ -232,21 +235,41 @@ async function startRecording(options: RecordingOptions, streamId?: string): Pro
     stopAllStreams();
   };
 
-  mediaRecorder.start(500);
+  mediaRecorder.start(1000);
+
+  chunkTimer = setInterval(() => {
+    if (mediaRecorder?.state !== 'recording') return;
+    try {
+      mediaRecorder.requestData();
+    } catch {
+      // ignore
+    }
+  }, 5000);
+
+  return displaySurface;
 }
 
 function stopRecording(): void {
-  stopReason = 'user';
-  if (mediaRecorder?.state === 'recording' || mediaRecorder?.state === 'paused') {
-    if (mediaRecorder.state === 'recording') {
-      try {
-        mediaRecorder.requestData();
-      } catch {
-        // ignore
-      }
-    }
-    mediaRecorder.stop();
+  stopReason = stopReason ?? 'user';
+
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    stopAllStreams();
+    return;
   }
+
+  try {
+    if (mediaRecorder.state === 'recording') {
+      mediaRecorder.requestData();
+    }
+  } catch {
+    // ignore
+  }
+
+  setTimeout(() => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    }
+  }, 150);
 }
 
 chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }, _sender, sendResponse) => {
@@ -257,7 +280,7 @@ chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }, 
 
   if (message.type === 'OFFSCREEN_START') {
     startRecording(message.options, message.streamId)
-      .then(() => sendResponse({ ok: true }))
+      .then((displaySurface) => sendResponse({ ok: true, displaySurface }))
       .catch((err) =>
         sendResponse({
           ok: false,
@@ -283,6 +306,7 @@ chrome.runtime.onMessage.addListener((message: Message & { streamId?: string }, 
     case 'OFFSCREEN_CANCEL':
       stopReason = 'user';
       recordedChunks = [];
+      clearChunkTimer();
       if (mediaRecorder) {
         mediaRecorder.onstop = null;
         if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();

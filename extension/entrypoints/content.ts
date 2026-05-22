@@ -120,9 +120,11 @@ export default defineContentScript({
 
       switch (message.type) {
         case 'WEBCAM_START':
-          void startGlobalWebcamBubble().catch(() => {
+          try {
+            startGlobalWebcamBubble();
+          } catch {
             chrome.runtime.sendMessage({ type: 'WEBCAM_UNAVAILABLE' } as Message);
-          });
+          }
           break;
         case 'WEBCAM_STOP':
           stopGlobalWebcamBubble();

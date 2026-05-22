@@ -1,110 +1,75 @@
-import type { Message } from './messaging';
-
-const PIP_ROOT_ID = 'reel-pip-host';
 const IFRAME_ROOT_ID = 'reel-webcam-iframe-root';
-
-let pipStream: MediaStream | null = null;
-let pipVideo: HTMLVideoElement | null = null;
-let usingExtensionIframe = false;
 
 function removeExtensionIframe(): void {
   document.getElementById(IFRAME_ROOT_ID)?.remove();
-  usingExtensionIframe = false;
+}
+
+function makeDraggable(root: HTMLElement): void {
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let originRight = 24;
+  let originBottom = 96;
+
+  const onMove = (e: MouseEvent) => {
+    if (!dragging) return;
+    const dx = startX - e.clientX;
+    const dy = e.clientY - startY;
+    root.style.right = `${Math.max(8, originRight + dx)}px`;
+    root.style.bottom = `${Math.max(8, originBottom + dy)}px`;
+  };
+
+  const onUp = () => {
+    dragging = false;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    const right = parseInt(root.style.right, 10);
+    const bottom = parseInt(root.style.bottom, 10);
+    if (!Number.isNaN(right)) originRight = right;
+    if (!Number.isNaN(bottom)) originBottom = bottom;
+  };
+
+  root.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    originRight = parseInt(root.style.right, 10) || 24;
+    originBottom = parseInt(root.style.bottom, 10) || 96;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
 }
 
 function injectExtensionIframe(): void {
   if (document.getElementById(IFRAME_ROOT_ID)) return;
-  usingExtensionIframe = true;
 
   const root = document.createElement('div');
   root.id = IFRAME_ROOT_ID;
   root.style.cssText =
-    'position:fixed;bottom:96px;right:24px;z-index:2147483645;width:160px;height:160px;border-radius:50%;overflow:hidden;border:3px solid #6366f1;box-shadow:0 8px 24px rgba(0,0,0,0.35);pointer-events:none;';
+    'position:fixed;bottom:96px;right:24px;z-index:2147483645;width:160px;height:160px;border-radius:50%;overflow:hidden;border:3px solid #6366f1;box-shadow:0 8px 24px rgba(0,0,0,0.35);pointer-events:auto;cursor:grab;';
 
   const iframe = document.createElement('iframe');
   iframe.src = chrome.runtime.getURL('/webcam-bubble.html');
-  iframe.allow = 'camera';
-  iframe.style.cssText = 'width:100%;height:100%;border:none;';
+  iframe.allow = 'camera; microphone';
+  iframe.style.cssText = 'width:100%;height:100%;border:none;pointer-events:none;';
   root.appendChild(iframe);
   document.documentElement.appendChild(root);
-}
-
-async function startPictureInPicture(): Promise<boolean> {
-  if (pipStream?.active) {
-    try {
-      if (document.pictureInPictureElement !== pipVideo) {
-        await pipVideo?.requestPictureInPicture();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 320, height: 320, facingMode: 'user' },
-    audio: false,
-  });
-
-  pipStream = stream;
-
-  let host = document.getElementById(PIP_ROOT_ID);
-  if (!host) {
-    host = document.createElement('div');
-    host.id = PIP_ROOT_ID;
-    host.style.cssText =
-      'position:fixed;width:160px;height:160px;right:0;bottom:0;opacity:0;pointer-events:none;overflow:hidden;';
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.muted = true;
-    video.playsInline = true;
-    video.style.cssText = 'width:100%;height:100%;object-fit:cover;transform:scaleX(-1);';
-    host.appendChild(video);
-    document.documentElement.appendChild(host);
-    pipVideo = video;
-  } else {
-    pipVideo = host.querySelector('video') as HTMLVideoElement;
-  }
-
-  pipVideo!.srcObject = stream;
-  await pipVideo!.play();
-
-  if (!document.pictureInPictureEnabled) return false;
-
-  try {
-    await pipVideo!.requestPictureInPicture();
-    return true;
-  } catch {
-    return false;
-  }
+  makeDraggable(root);
 }
 
 export function isWebcamBubbleActive(): boolean {
-  return Boolean(
-    pipStream?.active ||
-      document.pictureInPictureElement ||
-      document.getElementById(IFRAME_ROOT_ID),
-  );
+  return Boolean(document.getElementById(IFRAME_ROOT_ID));
 }
 
-export async function startGlobalWebcamBubble(): Promise<void> {
-  if (document.pictureInPictureElement && pipStream?.active) return;
-
+/** In-page bubble (extension iframe). Camera + PiP run inside the extension page. */
+export function startGlobalWebcamBubble(): void {
   removeExtensionIframe();
-
-  try {
-    const pipOk = await startPictureInPicture();
-    if (pipOk) return;
-  } catch {
-    // fall through to extension iframe
-  }
-
   injectExtensionIframe();
 }
 
-/** Move extension iframe to the active tab when PiP is unavailable. */
 export function relocateExtensionIframe(): void {
-  if (document.pictureInPictureElement && pipStream?.active) return;
   removeExtensionIframe();
   injectExtensionIframe();
 }
@@ -114,17 +79,5 @@ export function removeIframeBubbleOnly(): void {
 }
 
 export function stopGlobalWebcamBubble(): void {
-  if (document.pictureInPictureElement === pipVideo) {
-    void document.exitPictureInPicture().catch(() => {});
-  }
-
-  pipStream?.getTracks().forEach((t) => t.stop());
-  pipStream = null;
-  pipVideo = null;
-  document.getElementById(PIP_ROOT_ID)?.remove();
   removeExtensionIframe();
-
-  if (usingExtensionIframe) {
-    chrome.runtime.sendMessage({ type: 'WEBCAM_STOP' } satisfies Message).catch(() => {});
-  }
 }

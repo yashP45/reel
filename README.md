@@ -1,38 +1,116 @@
-# Reel — Loom-style Chrome Extension (Take-Home)
+# Reel — Record & Share
 
-Record your screen in seconds, preview instantly, and share a link. Built as a **Loom alternative** with a faster, side-panel-first UX.
+A **Loom-style Chrome extension** for fast screen recording and shareable links. Open the side panel, pick what to share, stop from a floating control bar, preview instantly, and copy a link.
 
-## Deliverables
+| Resource | Location |
+|----------|----------|
+| Chrome extension source | [`extension/`](extension/) |
+| Web app (watch, login, dashboard) | [`web/`](web/) |
+| Supabase SQL | [`supabase/`](supabase/) |
+| Design & tradeoffs | [`REASONING.md`](REASONING.md) |
 
-| Deliverable | Location |
-|-------------|----------|
-| Chrome extension `.zip` | [`extension/.output/reel-extension-1.0.0-chrome.zip`](extension/.output/reel-extension-1.0.0-chrome.zip) |
-| Reasoning document | [`REASONING.md`](REASONING.md) |
-| Demo video script | [Demo script](#demo-video-script) below |
-| Source code | This repo — push to GitHub for submission link |
+---
 
 ## Features
 
-- **Side panel UI** — roomy controls vs a cramped popup
-- **Record this tab** in one click (3s countdown + floating control bar)
-- **Window / full screen** via Chrome’s desktop capture picker
-- **Microphone** + **webcam bubble** (tab mode; bubble appears in recording)
-- **Instant local preview** while upload runs in the background
-- **Shareable link** via Supabase Storage + watch page
-- **Keyboard shortcut:** `Alt+Shift+R` (record current tab)
+- **Side panel UI** — record, preview, upload, and recent library in one place
+- **Chrome share picker** — Tab, Window, or Entire screen in one flow
+- **Auto-focus** — picking a tab or window switches you to that surface
+- **Floating controls** — pause/stop bar follows your active tab (great for full-screen recordings)
+- **Microphone** + optional **webcam bubble** (in-page overlay / PiP when supported)
+- **Instant local preview** after stop; upload runs in the background
+- **Share links** via Supabase Storage + Next.js watch page
+- **Guest recording** — no account required to record and share
+- **Optional sign-in** — save recordings to your web dashboard
+- **Keyboard shortcut:** `Alt+Shift+R` — open panel and start the same picker
 
-## Quick start
+---
 
-### 1. Extension (local / unpacked)
+## Prerequisites
+
+- **Node.js** 18+ and npm
+- **Google Chrome** (Manifest V3)
+- **Supabase project** (optional — required for share links and dashboard; local download works without it)
+
+---
+
+## Installation
+
+### 1. Clone and install dependencies
+
+```bash
+git clone <your-repo-url> loom
+cd loom
+
+cd extension && npm install && cd ..
+cd web && npm install && cd ..
+```
+
+### 2. Supabase setup (share links + dashboard)
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. **SQL Editor** → run [`supabase/setup.sql`](supabase/setup.sql).
+3. **SQL Editor** → run [`supabase/migrations/004_auth_users.sql`](supabase/migrations/004_auth_users.sql) (auth + owner RLS).
+4. If uploads fail with RLS errors, also run [`supabase/migrations/003_fix_rls_policies.sql`](supabase/migrations/003_fix_rls_policies.sql).
+5. **Storage** → create a **public** bucket named `recordings`.
+6. **Authentication** → **Providers** → **Email** → enable email + password.
+7. For local dev, turn **off** “Confirm email” so sign-up works immediately.
+
+### 3. Configure environment variables
+
+**Extension** — copy and edit:
 
 ```bash
 cd extension
-cp .env.example .env   # optional — for cloud share links
-npm install
-npm run dev            # loads .output/chrome-mv3 with hot reload
+cp .env.example .env
 ```
 
-**Load in Chrome:** `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/.output/chrome-mv3` (after `npm run dev` or `npm run build`).
+```env
+VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+VITE_SHARE_PAGE_URL=http://localhost:3000
+```
+
+**Web app** — copy and edit:
+
+```bash
+cd web
+cp .env.example .env.local
+```
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
+NEXT_PUBLIC_EXTENSION_ID=your-extension-id
+```
+
+Get `NEXT_PUBLIC_EXTENSION_ID` after loading the extension from `chrome://extensions` (Developer mode → Reel → ID).
+
+### 4. Build and load the extension
+
+```bash
+cd extension
+npm run build
+```
+
+In Chrome:
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select `extension/.output/chrome-mv3`
+5. Pin **Reel** and allow **Side panel** when prompted
+
+After every code change: `npm run build` in `extension/` → **Reload** on `chrome://extensions`.
+
+**Development with hot reload:**
+
+```bash
+cd extension
+npm run dev
+# Load unpacked from extension/.output/chrome-mv3
+```
 
 **Production zip:**
 
@@ -43,109 +121,139 @@ npm run zip
 # → extension/.output/reel-extension-1.0.0-chrome.zip
 ```
 
-Or run `scripts/package-extension.ps1` from the repo root.
+Or from repo root: `scripts/package-extension.ps1`
 
-### 2. Supabase (share links)
-
-1. Create a [Supabase](https://supabase.com) project.
-2. In **SQL Editor**, run all of [`supabase/setup.sql`](supabase/setup.sql) (creates table + RLS policies).
-3. In **Storage**, create a **public** bucket named `recordings` (if it doesn't exist yet).
-4. If upload still fails with RLS errors, re-run [`supabase/migrations/003_fix_rls_policies.sql`](supabase/migrations/003_fix_rls_policies.sql).
-5. Copy `extension/.env.example` → `extension/.env`:
-
-```env
-VITE_SUPABASE_URL=https://xxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJ...
-VITE_SHARE_PAGE_URL=http://localhost:3000
-```
-
-6. Rebuild the extension: `npm run build` in `extension/`.
-
-Without Supabase, recording and **download** still work; share links show a setup hint.
-
-### 3. Web app (watch page + dashboard + email sign-in)
+### 5. Start the web app
 
 ```bash
 cd web
-cp .env.example .env.local
-npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Routes:
+Open [http://localhost:3000](http://localhost:3000)
 
-- `/watch/[id]` — public video player
-- `/login` — email + password (no email sent on each sign-in)
-- `/dashboard` — your recordings (copy link, delete)
+| Route | Purpose |
+|-------|---------|
+| `/watch/[id]` | Public video player (share links) |
+| `/login` | Sign in / sign up (`?ext=1` for extension auth) |
+| `/dashboard` | Your recordings (signed-in users) |
 
-**Supabase auth setup:**
+Rebuild the extension whenever you change `extension/.env`.
 
-1. Dashboard → **Authentication** → **Providers** → **Email** → enable **Email** (with password).
-2. For dev, turn **off** “Confirm email” so sign-up works without a confirmation mail.
-3. **Extension auth:** Copy your extension ID from `chrome://extensions` into `NEXT_PUBLIC_EXTENSION_ID` in `web/.env.local`. Sign in via extension → `/login?ext=1` → email + password → extension connects.
+---
 
-See [`web/AUTH.md`](web/AUTH.md) for details.
+## Usage guide
 
-Run [`supabase/migrations/004_auth_users.sql`](supabase/migrations/004_auth_users.sql) after `setup.sql` for dashboard + owner RLS.
+### Record a video
 
-Set `VITE_SHARE_PAGE_URL=http://localhost:3000` in `extension/.env` and rebuild.
+1. Open a normal website (`https://…`) — not `chrome://` pages.
+2. Click the **Reel** icon → side panel opens.
+3. Toggle **Microphone** / **Webcam bubble** if needed.
+4. Click **Record**.
+5. In Chrome’s dialog, choose:
+   - **Entire screen** — record everything; switch apps freely; controls follow your active Chrome tab
+   - **Window** — one app window; Reel focuses that window after you pick it
+   - **Tab** — one browser tab; Reel switches to that tab after you pick it
+6. A floating **pause / stop** bar appears on the page. You can close the side panel — stop still works from the bar.
 
-Legacy Vite share page remains in `share-page/` but Next.js `web/` is the primary app.
+### Stop recording
+
+Use any of these:
+
+- **Stop** on the floating bar
+- **Stop** in the side panel (re-open it if closed)
+- Chrome’s **Stop sharing** in the browser bar
+
+All paths should dismiss the sharing indicator and show preview in the side panel.
+
+### Share or download
+
+1. After stop, the side panel shows a **local preview** immediately.
+2. If Supabase is configured, upload runs in the background.
+3. Click **Copy share link** when upload completes.
+4. Open the link in any browser (e.g. `http://localhost:3000/watch/<id>`).
+5. **Download .webm** works even without Supabase.
+
+### Sign in (optional)
+
+- Side panel → **Sign in** → opens `/login?ext=1`
+- Create an account or sign in with email + password
+- Extension receives the session; uploads attach to your user
+- View and manage recordings at `/dashboard`
+
+No account is required to record, preview locally, or get a share link (guest session).
+
+### Keyboard shortcut
+
+`Alt+Shift+R` — opens the side panel and starts the same record flow (Chrome share picker).
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| Share link / upload fails | Check Supabase env in `extension/.env`, rebuild extension, verify `recordings` bucket is public |
+| “No video data captured” | Reload extension; pick **Entire screen** or **Window**; stop via Reel’s Stop button |
+| Side panel stuck on “Please wait…” | Reload extension; click Chrome **Stop sharing**; try again |
+| Camera bubble missing | Allow camera for Reel in `chrome://extensions` → Reel → Details |
+| Watch page 500 / module error | Stop dev server, delete `web/.next`, run `npm run dev` again |
+| `chrome://` pages won’t record | Expected Chrome restriction — use a normal https page |
+| Invalid credentials on login | Confirm email in Supabase or disable “Confirm email” for dev |
+
+---
 
 ## Project structure
 
 ```
 loom/
-├── extension/          # WXT + React + Tailwind (MV3)
-├── web/                # Next.js watch + dashboard + auth
-├── share-page/         # Legacy Vite watch page
-├── supabase/           # SQL migrations
-├── REASONING.md        # Design & tradeoffs (30% rubric)
-└── scripts/            # Zip packaging
+├── extension/          # WXT + React + Tailwind (Chrome MV3)
+│   ├── entrypoints/    # background, sidepanel, offscreen, content, webcam-bubble
+│   └── lib/              # capture, storage, supabase upload, messaging
+├── web/                # Next.js — watch page, login, dashboard
+├── supabase/           # SQL setup + migrations
+├── scripts/            # Extension zip packaging
+├── REASONING.md        # Architecture decisions & tradeoffs
+└── README.md           # This file
 ```
 
-## Demo video script
-
-**Target length:** 2–3 minutes.
-
-1. **Install** — Load unpacked extension; pin Reel; open side panel.
-2. **Record tab** — Click “Record this tab”; show 3s countdown on page; show floating pill (timer, pause, stop).
-3. **Optional** — Enable webcam bubble; show it on the page.
-4. **Stop** — Click Stop; side panel shows **instant preview**.
-5. **Upload** — Progress bar; **Copy share link** when done.
-6. **Share** — Open link in **incognito** (watch page plays video).
-7. **Shortcut** — `Alt+Shift+R` starts tab recording.
-8. **Close** — Mention download `.webm` works without cloud.
+---
 
 ## Manual test checklist
 
-- [ ] Record tab → preview plays
+- [ ] Record **Entire screen** → preview plays, share link works
+- [ ] Record **Tab** → switches to that tab, preview plays
+- [ ] Record **Window** → focuses window, preview plays
 - [ ] Pause / resume during recording
-- [ ] Window mode → picker → recording works
+- [ ] Stop from floating bar (side panel closed)
+- [ ] Stop from Chrome “Stop sharing” bar
 - [ ] Mic on / off
-- [ ] Webcam bubble (tab mode)
-- [ ] Upload + copy link (with Supabase configured)
-- [ ] Watch page loads in incognito
-- [ ] Download .webm
-- [ ] `chrome://` pages cannot be recorded (expected)
+- [ ] Webcam bubble (optional)
+- [ ] Guest share link opens in incognito
+- [ ] Sign in → dashboard shows recordings
+- [ ] Download `.webm` without Supabase
 
-## GitHub
+---
 
-```bash
-git init
-git add .
-git commit -m "feat: Reel Loom-style screen recorder extension"
-git remote add origin https://github.com/YOUR_USER/loom.git
-git push -u origin main
-```
+## Demo video script (~2–3 min)
+
+1. **Install** — Load unpacked extension; pin Reel; open side panel.
+2. **Record** — Click Record → pick Entire screen → show floating controls.
+3. **Browse** — Switch tabs; controls follow.
+4. **Stop** — Stop → instant preview in panel.
+5. **Share** — Copy link → open in incognito watch page.
+6. **Optional** — Sign in, show dashboard; mention download works offline.
+
+---
 
 ## Tech stack
 
-- [WXT](https://wxt.dev) + React 19 + TypeScript
-- Tailwind CSS v4
-- Chrome MV3: side panel, offscreen document, tab/desktop capture
-- Supabase Storage + Postgres
+- [WXT](https://wxt.dev) + React 19 + TypeScript + Tailwind CSS v4
+- Chrome MV3: side panel, offscreen document, `getDisplayMedia`, content scripts
+- [Next.js](https://nextjs.org) 15 + Supabase (Auth, Storage, Postgres)
+
+---
 
 ## License
 
-MIT — take-home submission.
+MIT

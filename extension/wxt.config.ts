@@ -38,5 +38,11 @@ export default defineConfig({
     externally_connectable: {
       matches: ['http://localhost:3000/*', 'https://*.vercel.app/*'],
     },
+    web_accessible_resources: [
+      {
+        resources: ['webcam-bubble.html', 'chunks/webcam-bubble-*.js'],
+        matches: ['https://*/*', 'http://*/*'],
+      },
+    ],
   },
 });

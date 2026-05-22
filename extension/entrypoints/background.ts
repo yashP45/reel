@@ -8,6 +8,8 @@ import { MIN_RECORDING_BYTES } from '../lib/recording-format';
 import { getRecording, saveRecording, updateRecording } from '../lib/storage';
 import { setAuthSession, type AuthSession } from '../lib/auth-storage';
 import { uploadRecording } from '../lib/supabase';
+import { sendToOffscreen } from '../lib/offscreen-client';
+import { waitForOffscreenRecorder } from '../lib/offscreen-manager';
 import { sendToTab } from '../lib/tab-messaging';
 import { setWebcamSessionActive } from '../lib/webcam-session';
 import type { RecordingOptions, StoredRecording } from '../lib/types';
@@ -15,8 +17,10 @@ import type { RecordingOptions, StoredRecording } from '../lib/types';
 let state: AppState = { phase: 'idle' };
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+let processingTimeout: ReturnType<typeof setTimeout> | null = null;
 let recordingTabId: number | undefined;
 let webcamHostTabId: number | undefined;
+let webcamDisplayMode: 'pip' | 'iframe' | null = null;
 let recordingOverlayOptions: Pick<RecordingOptions, 'webcam' | 'mic'> = {
   webcam: false,
   mic: true,
@@ -28,9 +32,35 @@ async function stopWebcamBubble(): Promise<void> {
   if (webcamHostTabId != null) tabIds.add(webcamHostTabId);
   for (const id of tabIds) {
     await sendToTab(id, { type: 'WEBCAM_STOP' });
+    await sendToTab(id, { type: 'WEBCAM_REMOVE_IFRAME' });
   }
   webcamHostTabId = undefined;
+  webcamDisplayMode = null;
   setWebcamSessionActive(false);
+}
+
+async function showWebcamOnTab(tabId: number): Promise<boolean> {
+  webcamHostTabId = tabId;
+  setWebcamSessionActive(true);
+  const ok = await sendToTab(tabId, { type: 'WEBCAM_START' });
+  if (!ok) {
+    setWebcamSessionActive(false);
+    webcamHostTabId = undefined;
+  }
+  return ok;
+}
+
+async function startWebcamBubble(): Promise<void> {
+  const tabId = webcamHostTabId ?? recordingTabId;
+  if (tabId == null) return;
+
+  const ok = await showWebcamOnTab(tabId);
+  if (!ok) {
+    setState({
+      error:
+        'Camera unavailable on this page. Open a normal website (https://) and try again, or allow Camera for Reel in chrome://extensions.',
+    });
+  }
 }
 
 async function hideAllOverlays(): Promise<void> {
@@ -58,14 +88,15 @@ async function moveOverlayToTab(newTabId: number): Promise<void> {
 
   if (oldTabId != null) {
     await hideOverlay(oldTabId);
-    if (recordingOverlayOptions.webcam) {
+    if (recordingOverlayOptions.webcam && webcamDisplayMode === 'iframe') {
       await sendToTab(oldTabId, { type: 'WEBCAM_REMOVE_IFRAME' });
     }
   }
   await injectOverlay(newTabId, { mic: recordingOverlayOptions.mic });
-  if (recordingOverlayOptions.webcam) {
-    await sendToTab(newTabId, { type: 'WEBCAM_RELOCATE' });
+
+  if (recordingOverlayOptions.webcam && webcamDisplayMode === 'iframe') {
     webcamHostTabId = newTabId;
+    await sendToTab(newTabId, { type: 'WEBCAM_RELOCATE' });
   }
 
   if (state.elapsedMs != null) {
@@ -101,6 +132,79 @@ function clearTimers(): void {
   elapsedTimer = null;
 }
 
+function clearProcessingTimeout(): void {
+  if (processingTimeout) clearTimeout(processingTimeout);
+  processingTimeout = null;
+}
+
+function startProcessingTimeout(): void {
+  clearProcessingTimeout();
+  processingTimeout = setTimeout(() => {
+    if (state.phase !== 'processing') return;
+    void sendToOffscreen({ type: 'OFFSCREEN_CANCEL' });
+    clearTimers();
+    void hideAllOverlays();
+    setState({
+      phase: 'idle',
+      recordingTabId: undefined,
+      paused: undefined,
+      startedAt: undefined,
+      elapsedMs: undefined,
+      error: 'Stop timed out. Reload the extension and try again.',
+    });
+  }, 45_000);
+}
+
+async function resolveCapturedTab(
+  displaySurface?: string,
+): Promise<{ tabId: number; title: string } | null> {
+  if (displaySurface !== 'browser' && displaySurface !== 'window') return null;
+
+  await new Promise((r) => setTimeout(r, 150));
+  const [focused] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!focused?.id || !isCapturableUrl(tabUrl(focused))) return null;
+
+  return { tabId: focused.id, title: focused.title ?? 'Recording' };
+}
+
+async function beginOffscreenCapture(options: RecordingOptions): Promise<void> {
+  try {
+    setState({ phase: 'processing', error: undefined });
+    const tab = await resolveRecordingTab();
+    const tabId = tab.id!;
+    const title = tab.title ?? options.tabTitle ?? 'Recording';
+    recordingTabId = tabId;
+
+    await waitForOffscreenRecorder();
+    const result = await sendToOffscreen({
+      type: 'OFFSCREEN_START',
+      options: { ...options, tabId, tabTitle: title },
+    });
+
+    if (!result.ok) {
+      setState({
+        phase: 'idle',
+        error: result.error ?? 'Failed to start recording',
+      });
+      return;
+    }
+
+    const captured = await resolveCapturedTab(result.displaySurface);
+    const overlayTabId = captured?.tabId ?? tabId;
+    const overlayTitle = captured?.title ?? title;
+
+    await onRecordingStarted(overlayTabId, overlayTitle, {
+      webcam: options.webcam,
+      mic: options.mic,
+    });
+  } catch (err) {
+    setState({
+      phase: 'idle',
+      error: err instanceof Error ? err.message : 'Failed to start recording',
+    });
+  }
+}
+
 async function injectOverlay(tabId: number, options: Pick<RecordingOptions, 'mic'>): Promise<void> {
   await new Promise((r) => setTimeout(r, 300));
   await sendToTab(tabId, {
@@ -125,7 +229,7 @@ async function onRecordingStarted(
   if (options.webcam) {
     webcamHostTabId = tabId;
     setWebcamSessionActive(true);
-    void sendToTab(tabId, { type: 'WEBCAM_START' });
+    void startWebcamBubble();
   }
 
   const startedAt = Date.now();
@@ -173,6 +277,7 @@ async function handleRecordingComplete(
   meta: StoredRecording,
   buffer?: ArrayBuffer,
 ): Promise<void> {
+  clearProcessingTimeout();
   clearTimers();
   await hideAllOverlays();
 
@@ -335,6 +440,35 @@ export default defineBackground(() => {
         break;
       }
 
+      case 'WEBCAM_TOGGLE_PREVIEW': {
+        if (!message.enabled) {
+          if (!isRecordingPhase()) void stopWebcamBubble();
+          break;
+        }
+        try {
+          const tab = await getActiveTab();
+          if (!tab.id || !isCapturableUrl(tabUrl(tab))) {
+            setState({
+              error: 'Open a normal website (https://) to preview the camera bubble.',
+            });
+            break;
+          }
+          const ok = await showWebcamOnTab(tab.id);
+          if (!ok) {
+            setState({
+              error:
+                'Could not show camera on this tab. Reload the page or try another site.',
+            });
+          }
+        } catch (err) {
+          setState({
+            phase: state.phase,
+            error: err instanceof Error ? err.message : 'Could not open camera preview',
+          });
+        }
+        break;
+      }
+
       case 'PREPARE_RECORDING': {
         try {
           const tab = await prepareRecordingTab(message.options);
@@ -354,6 +488,10 @@ export default defineBackground(() => {
         break;
       }
 
+      case 'START_RECORDING':
+        void beginOffscreenCapture(message.options);
+        break;
+
       case 'RECORDING_STARTED':
         await onRecordingStarted(message.tabId, message.title, {
           webcam: message.webcam,
@@ -362,22 +500,32 @@ export default defineBackground(() => {
         break;
 
       case 'STOP_RECORDING':
-        setState({ phase: 'processing' });
+        if (elapsedTimer) clearInterval(elapsedTimer);
+        elapsedTimer = null;
+        setState({ phase: 'processing', paused: undefined });
+        if (recordingTabId != null) void hideOverlay(recordingTabId);
+        void stopWebcamBubble();
+        void sendToOffscreen({ type: 'OFFSCREEN_STOP' });
+        startProcessingTimeout();
         break;
 
       case 'PAUSE_RECORDING':
         setState({ paused: true });
         if (recordingTabId) await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: true });
+        void sendToOffscreen({ type: 'OFFSCREEN_PAUSE' });
         break;
 
       case 'RESUME_RECORDING':
         setState({ paused: false });
         if (recordingTabId) await sendToTab(recordingTabId, { type: 'OVERLAY_PAUSED', paused: false });
+        void sendToOffscreen({ type: 'OFFSCREEN_RESUME' });
         break;
 
       case 'CANCEL_RECORDING':
+        clearProcessingTimeout();
         clearTimers();
         await hideAllOverlays();
+        void sendToOffscreen({ type: 'OFFSCREEN_CANCEL' });
         setState({
           phase: 'idle',
           recordingTabId: undefined,
@@ -409,6 +557,7 @@ export default defineBackground(() => {
       }
 
       case 'RECORDING_ERROR':
+        clearProcessingTimeout();
         clearTimers();
         await hideAllOverlays();
         setState({ phase: 'idle', error: message.error });
@@ -421,9 +570,25 @@ export default defineBackground(() => {
         break;
 
       case 'WEBCAM_UNAVAILABLE':
-        if (state.phase === 'recording') {
-          setState({ error: 'Webcam blocked — recording without camera bubble.' });
+        if (state.phase === 'recording' || state.phase === 'paused') {
+          setState({
+            error:
+              'Camera blocked for Reel. Allow Camera on the extension (chrome://extensions → Reel) or in chrome://settings/content/camera.',
+          });
         }
+        break;
+
+      case 'WEBCAM_READY':
+        if (state.phase === 'recording' || state.phase === 'paused') {
+          const err = state.error ?? '';
+          if (/camera|webcam/i.test(err)) {
+            setState({ error: undefined });
+          }
+        }
+        break;
+
+      case 'WEBCAM_MODE':
+        webcamDisplayMode = message.mode;
         break;
 
       case 'UPLOAD_RECORDING': {
