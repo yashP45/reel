@@ -26,6 +26,8 @@ No Google OAuth or magic links. Sign in with email + password only (no email sen
 
 ## Extension
 
-Set `NEXT_PUBLIC_EXTENSION_ID` in `.env.local` to your Chrome extension ID.
+**Production:** set `NEXT_PUBLIC_EXTENSION_ID` in `.env.local` to your fixed Chrome extension ID (Web Store or manifest `key`).
+
+**Reviewers / unpacked install:** leave `NEXT_PUBLIC_EXTENSION_ID` empty (or omit on Vercel). After sign-in with `?ext=1`, `/auth/extension-callback` shows a form to paste the ID from `chrome://extensions` → Reel → Details. It is saved in `localStorage` for that browser.
 
 After password sign-in with `?ext=1`, the app redirects to `/auth/extension-callback` to pass the session to the extension.

@@ -85,7 +85,7 @@ NEXT_PUBLIC_SITE_URL=http://localhost:3000
 NEXT_PUBLIC_EXTENSION_ID=your-extension-id
 ```
 
-Get `NEXT_PUBLIC_EXTENSION_ID` after loading the extension from `chrome://extensions` (Developer mode → Reel → ID).
+Get `NEXT_PUBLIC_EXTENSION_ID` after loading the extension from `chrome://extensions` (optional — reviewers can paste their ID on the connect page instead).
 
 ### 4. Build and load the extension
 
