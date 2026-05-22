@@ -12,9 +12,24 @@ No Google OAuth or magic links. Sign in with email + password only (no email sen
    - Turn **off** “Confirm email” so new sign-ups can sign in immediately without a confirmation email
    - If “Confirm email” stays **on**, new users must click the link in their inbox before sign-in works (otherwise you see “Invalid login credentials”)
 
-3. **Authentication → URL configuration**
+3. **Authentication → URL configuration** (this controls links in confirmation emails)
+
+   **Local dev only:**
    - **Site URL:** `http://localhost:3000`
-   - **Redirect URLs:** add `http://localhost:3000/auth/callback` and `http://localhost:3000/auth/callback?ext=1` (required when confirm email is on)
+   - **Redirect URLs:** add each on its own line:
+     - `http://localhost:3000/auth/callback`
+     - `http://localhost:3000/auth/callback?ext=1`
+
+   **Deployed app (Vercel, etc.):**
+   - **Site URL:** `https://your-app.vercel.app` (your real domain)
+   - **Redirect URLs:** add:
+     - `https://your-app.vercel.app/auth/callback`
+     - `https://your-app.vercel.app/auth/callback?ext=1`
+   - Set the same URL in Vercel env: `NEXT_PUBLIC_SITE_URL=https://your-app.vercel.app`
+
+   If Site URL is still `localhost`, Supabase emails will point to localhost even from production.
+
+4. **Email templates (optional):** Authentication → Email Templates → Confirm signup — links use `{{ .ConfirmationURL }}` which respects `emailRedirectTo` when redirect URLs allow it.
 
 ## Sign-in flow
 

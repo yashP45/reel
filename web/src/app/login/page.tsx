@@ -2,6 +2,7 @@
 
 import { PasswordField } from '@/components/PasswordField';
 import { validateLoginForm, type LoginFieldErrors } from '@/lib/auth/validate';
+import { authCallbackUrl } from '@/lib/site-url';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, Suspense, useState } from 'react';
@@ -31,10 +32,7 @@ function LoginForm() {
   const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<LoginFieldErrors>({});
 
-  const authRedirectTo = () => {
-    const base = `${window.location.origin}/auth/callback`;
-    return forExtension ? `${base}?ext=1` : base;
-  };
+  const authRedirectTo = () => authCallbackUrl(forExtension);
 
   const finishSignIn = () => {
     if (forExtension) {

@@ -88,13 +88,13 @@ async function moveOverlayToTab(newTabId: number): Promise<void> {
 
   if (oldTabId != null) {
     await hideOverlay(oldTabId);
-    if (recordingOverlayOptions.webcam && webcamDisplayMode === 'iframe') {
+    if (recordingOverlayOptions.webcam && webcamDisplayMode !== 'pip') {
       await sendToTab(oldTabId, { type: 'WEBCAM_REMOVE_IFRAME' });
     }
   }
   await injectOverlay(newTabId, { mic: recordingOverlayOptions.mic });
 
-  if (recordingOverlayOptions.webcam && webcamDisplayMode === 'iframe') {
+  if (recordingOverlayOptions.webcam && webcamDisplayMode !== 'pip') {
     webcamHostTabId = newTabId;
     await sendToTab(newTabId, { type: 'WEBCAM_RELOCATE' });
   }
@@ -105,6 +105,14 @@ async function moveOverlayToTab(newTabId: number): Promise<void> {
   if (state.paused) {
     await sendToTab(newTabId, { type: 'OVERLAY_PAUSED', paused: true });
   }
+}
+
+async function syncOverlayToFocusedWindow(): Promise<void> {
+  if (!isRecordingPhase()) return;
+  const win = await chrome.windows.getLastFocused({ populate: false });
+  if (!win.id || win.type !== 'normal') return;
+  const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+  if (tab?.id) await onActiveTabChanged(tab.id);
 }
 
 async function onActiveTabChanged(tabId: number): Promise<void> {
@@ -639,6 +647,11 @@ export default defineBackground(() => {
 
   chrome.tabs.onActivated.addListener((activeInfo) => {
     void onActiveTabChanged(activeInfo.tabId);
+  });
+
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+    void syncOverlayToFocusedWindow();
   });
 
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
